@@ -22,6 +22,11 @@ and signed staging contract for the future CPU Serverless endpoint. It is not
 deployed or enabled by default; ordinary submissions keep their current GPU
 worker behavior until a session coordinator provides a matching signed request.
 
+`coordinator/` provides the local durable record core for recipes and managed
+sessions. It is activated only when the ComfyUI server is configured with a
+state root and CPU-staging signing key; no lifecycle resources are created by
+the plugin in this release.
+
 ![Run on Runpod panel](panel.png)
 
 ## Components

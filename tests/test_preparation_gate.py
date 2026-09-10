@@ -140,13 +140,42 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         )
         configured = dict(self.settings, cpuStagerEndpointId="cpu-endpoint", cpuStagerVolumeBinding="volume-1")
         configured["cpuStagerSignedRequest"] = sign_stage_request(payload, "coordinator-key")
-        self.assertEqual(
-            self.routes._cpu_stager_request(configured, preparation, "prep-1"),
-            ("cpu-endpoint", configured["cpuStagerSignedRequest"]),
-        )
+        operation = self.routes._cpu_stager_request(configured, preparation, "prep-1")
+        self.assertEqual(operation.endpoint_id, "cpu-endpoint")
+        self.assertEqual(operation.signed_request, configured["cpuStagerSignedRequest"])
+        self.assertIsNone(operation.coordinator)
         configured["cpuStagerSignedRequest"]["payload"]["models"][0]["expected_size"] = 13
         with self.assertRaisesRegex(self.routes._SubmitError, "does not match"):
             self.routes._cpu_stager_request(configured, preparation, "prep-1")
+
+    async def test_managed_session_gets_endpoint_and_envelope_from_server_coordinator(self):
+        expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
+        metadata = {"base.safetensors": {
+            "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
+            "sha256": expected_sha256, "size": 12,
+        }}
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=None):
+            preparation = await self.routes._plan_model_preparation(
+                self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
+            )
+        fake = Mock()
+        fake.get_session.return_value = {"bindings": {"cpu_endpoint_id": "managed-cpu"}}
+        fake.authorize_stage.return_value = {"payload": "signed"}
+        with patch.object(self.routes, "SessionCoordinator", return_value=fake), \
+             patch.dict("os.environ", {
+                 "RUNONRUNPOD_COORDINATOR_ROOT": "/managed-state",
+                 "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "server-only",
+             }, clear=False):
+            operation = self.routes._cpu_stager_request(
+                dict(self.settings, managedSessionId="session-1"), preparation, "prep-1",
+            )
+        self.assertEqual(operation.endpoint_id, "managed-cpu")
+        self.assertEqual(operation.session_id, "session-1")
+        self.assertIs(operation.coordinator, fake)
+        fake.authorize_stage.assert_called_once_with(
+            "session-1", "prep-1", preparation.worker_downloads, "server-only",
+        )
 
     async def test_unsafe_reference_blocks_before_storage_or_gpu_work(self):
         unsafe_workflow = {

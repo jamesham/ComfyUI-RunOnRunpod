@@ -31,6 +31,7 @@ from .cpu_staging_contract import (
     stage_request_from_downloads,
     unsigned_stage_payload,
 )
+from .coordinator import CoordinatorError, SessionCoordinator
 
 _PREFIX = "[RunOnRunpod]"
 
@@ -660,17 +661,51 @@ def _make_progress_emitter(prep_id: str, planned_order: list[str], model_status:
     return emit
 
 
+@dataclass(frozen=True)
+class _CpuStagerOperation:
+    endpoint_id: str
+    signed_request: object
+    coordinator: SessionCoordinator | None = None
+    session_id: str | None = None
+
+
 def _cpu_stager_request(
     settings: dict,
     preparation: "_ModelPreparation",
     prep_id: str,
-) -> tuple[str, object] | None:
+) -> _CpuStagerOperation | None:
     """Return a coordinator-signed CPU request only when fully configured.
 
     The browser settings deliberately do not contain the signing key. A future
     coordinator supplies the opaque envelope, which is checked here against the
     exact local materialization before it can replace the legacy GPU fetch.
     """
+    managed_session_id = settings.get("managedSessionId")
+    if managed_session_id:
+        state_root = os.environ.get("RUNONRUNPOD_COORDINATOR_ROOT")
+        signing_key = os.environ.get("RUNONRUNPOD_CPU_STAGING_SIGNING_KEY")
+        if not state_root or not signing_key:
+            raise _SubmitError(
+                "Managed CPU staging is not configured on this ComfyUI server",
+                log="managed CPU staging needs RUNONRUNPOD_COORDINATOR_ROOT and signing key",
+            )
+        coordinator = SessionCoordinator(state_root)
+        try:
+            session = coordinator.get_session(managed_session_id)
+            bindings = session.get("bindings")
+            endpoint_id = bindings.get("cpu_endpoint_id") if isinstance(bindings, dict) else None
+            envelope = coordinator.authorize_stage(
+                managed_session_id, prep_id, preparation.worker_downloads, signing_key,
+            )
+        except CoordinatorError as error:
+            raise _SubmitError(
+                f"Managed CPU staging could not be authorized: {error}",
+                log=f"managed CPU coordinator: {error}",
+            ) from None
+        if not isinstance(endpoint_id, str) or not endpoint_id:
+            raise _SubmitError("Managed session has no CPU staging endpoint")
+        return _CpuStagerOperation(endpoint_id, envelope, coordinator, managed_session_id)
+
     endpoint_id = settings.get("cpuStagerEndpointId")
     envelope = settings.get("cpuStagerSignedRequest")
     if not endpoint_id and not envelope:
@@ -691,7 +726,7 @@ def _cpu_stager_request(
             "CPU staging request does not match this workflow's verified model plan",
             log="CPU staging signed payload differs from local materialization",
         )
-    return endpoint_id, envelope
+    return _CpuStagerOperation(endpoint_id, envelope)
 
 
 async def _run_worker_fetches(
@@ -912,7 +947,6 @@ async def _execute_model_preparation(
     if preparation.worker_downloads:
         cpu_stage = _cpu_stager_request(settings, preparation, prep_id)
         if cpu_stage is not None:
-            cpu_endpoint_id, signed_request = cpu_stage
 
             def _on_cpu_progress(output: dict) -> None:
                 for result in output.get("results") or []:
@@ -928,7 +962,7 @@ async def _execute_model_preparation(
 
             try:
                 cpu_result = await stage_models_on_cpu(
-                    cpu_endpoint_id, api_key, signed_request, _on_cpu_progress,
+                    cpu_stage.endpoint_id, api_key, cpu_stage.signed_request, _on_cpu_progress,
                 )
             except CpuStagerError as error:
                 raise _SubmitError(
@@ -948,6 +982,17 @@ async def _execute_model_preparation(
                 write_receipt, client, bucket, resolved.requirement, resolved.identity,
                 "cpu-stager" if cpu_stage is not None else "worker-fetch",
             )
+        if cpu_stage is not None and cpu_stage.coordinator is not None:
+            try:
+                await asyncio.to_thread(
+                    cpu_stage.coordinator.record_stage_result,
+                    cpu_stage.session_id, prep_id, cpu_result,
+                )
+            except CoordinatorError as error:
+                raise _SubmitError(
+                    f"CPU staging completed but managed state could not record readiness: {error}",
+                    log=f"managed CPU coordinator result: {error}",
+                ) from None
 
     await _upload_local_models(
         settings, bucket, client, preparation.upload_queue, preparation.materialized, prep_id,

@@ -42,6 +42,13 @@ legacy GPU fetch action only when a matching coordinator-signed request is
 present. No CPU endpoint is deployed or enabled by browser settings, and no
 live RunPod operation has been performed.
 
+Implemented next: `coordinator/` persists atomically versioned recipes,
+session bindings, authorization intent, and validated CPU completion records.
+It generates HMAC envelopes from the server-side signing key only after saving
+the exact request. With `managedSessionId`, the route obtains the CPU endpoint
+and signed request from this local state instead of browser settings. Lifecycle
+adapter calls that create, attach, or delete RunPod resources remain unimplemented.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -601,9 +608,9 @@ worker image's protocol version, as the current project requires.
 
 Progress: local model target/binding compilation, immutable local/remote
 materialization, volume readiness receipts, and a signed CPU-stage contract
-with a thin CPU image are implemented. The durable recipe/session schemas,
-coordinator, explicit upload-install contract, and deployed CPU endpoint are
-outstanding.
+with a thin CPU image are implemented. Durable recipe/session records and
+local request authorization are implemented. The lifecycle adapter, explicit
+upload-install contract, and deployed CPU endpoint are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy
