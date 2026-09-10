@@ -1,8 +1,9 @@
 """Local, crash-safe records for recipes and managed creative sessions.
 
 This module intentionally has no RunPod API client. It records intent and
-produces signed CPU-stage envelopes; a later lifecycle adapter performs remote
-create/delete calls between those durable transitions.
+produces signed CPU-stage envelopes; a guarded lifecycle adapter may perform
+remote create/delete calls between those durable transitions when an operator
+explicitly enables it.
 """
 
 from __future__ import annotations

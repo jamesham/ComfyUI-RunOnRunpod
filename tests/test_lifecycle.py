@@ -73,7 +73,7 @@ class LifecycleTests(unittest.TestCase):
 
         recovered = self.service.recover("session-1", self.profile)
         self.assertEqual(recovered["bindings"]["volume_id"], "volume-session-1")
-        self.assertEqual(self.provider.calls.count(("ensure_volume", "session-1")), 2)
+        self.assertEqual(self.provider.calls.count(("ensure_volume", "session-1")), 1)
 
         closed = self.service.end("session-1")
         self.assertEqual(closed["state"], "closed")

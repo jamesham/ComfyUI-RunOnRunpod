@@ -51,11 +51,20 @@ adapter calls that create, attach, or delete RunPod resources remain unimplement
 
 Implemented next: the coordinator has a versioned managed-profile schema and
 a provider-neutral lifecycle service. It journals create/delete intent before
-every provider operation, records exact returned bindings, uses idempotent
-recovery hooks, and closes CPU endpoints before volumes. Its fake-provider
-tests cover partial provisioning and resumable closure. A RunPod-specific
-adapter remains intentionally absent, so this code cannot create billable
-resources until that adapter is implemented and explicitly authorized.
+every provider operation, records exact returned bindings, uses recovery hooks,
+and closes CPU endpoints before volumes. Its fake-provider tests cover partial
+provisioning and resumable closure.
+
+Implemented next: `coordinator/runpod_adapter.py` is a guarded RunPod REST
+implementation. It creates a per-session volume, then a CPU endpoint attached
+to that exact volume, using a server-owned template ID and min/max workers of
+zero/one. It verifies the provider responses, records a resource ID plus
+ownership name, re-observes that evidence on recovery, and refuses deletion if
+the evidence no longer matches. Name-only reuse after an uncertain create is
+deliberately rejected for manual reconciliation. Mutations default to disabled,
+the adapter is not yet constructed by routes or browser settings, and its tests
+use a fake HTTP transport only; no live RunPod operation is enabled by this
+increment.
 
 ## 1. Objective and scope
 
@@ -615,10 +624,11 @@ worker image's protocol version, as the current project requires.
 
 Progress: local model target/binding compilation, immutable local/remote
 materialization, volume readiness receipts, and a signed CPU-stage contract
-with a thin CPU image are implemented. Durable recipe/session records and
-local request authorization plus a fakeable lifecycle core are implemented.
-The RunPod lifecycle adapter, explicit upload-install contract, and deployed
-CPU endpoint are outstanding.
+with a thin CPU image are implemented. Durable recipe/session records, local
+request authorization, a fakeable lifecycle core, and a guarded, hermetically
+tested RunPod REST lifecycle adapter are implemented. The explicit
+upload-install contract, server-side operator configuration/wiring of the
+adapter, and deployed CPU endpoint are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy

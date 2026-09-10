@@ -23,11 +23,14 @@ deployed or enabled by default; ordinary submissions keep their current GPU
 worker behavior until a session coordinator provides a matching signed request.
 
 `coordinator/` provides the local durable record core for recipes and managed
-sessions. It is activated only when the ComfyUI server is configured with a
-state root and CPU-staging signing key; no lifecycle resources are created by
-the plugin in this release. Its lifecycle service is provider-neutral and is
-currently exercised only against a fake provider; a RunPod-specific adapter is
-still required before any live session can be started or ended.
+sessions, plus a guarded RunPod REST lifecycle adapter. The adapter targets
+network-volume and CPU-endpoint creation, but is not wired to browser settings
+or request routes and rejects all mutations unless an operator explicitly
+enables them in server-side code. Its hermetic tests cover the documented
+[network-volume API](https://docs.runpod.io/api-reference/network-volumes/POST/networkvolumes)
+and [endpoint API](https://docs.runpod.io/api-reference/endpoints/POST/endpoints)
+shapes without making provider calls. Ordinary submissions therefore retain
+their existing GPU-worker behavior in this release.
 
 ![Run on Runpod panel](panel.png)
 

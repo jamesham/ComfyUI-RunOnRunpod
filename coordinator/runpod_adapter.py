@@ -1,0 +1,172 @@
+"""RunPod REST implementation of the lifecycle provider interface.
+
+Mutating REST calls are disabled unless ``allow_mutations`` is explicitly set.
+This keeps the adapter safe to construct in the ComfyUI server before an
+operator has authorized paid resource creation.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Callable, Mapping
+import urllib.error
+import urllib.request
+
+from .lifecycle import LifecycleError, ManagedProfile
+
+
+REST_BASE = "https://rest.runpod.io/v1"
+
+
+class RunPodAdapterError(LifecycleError):
+    pass
+
+
+Transport = Callable[[str, str, Mapping[str, object] | None], tuple[int, object]]
+
+
+class RunPodLifecycleAdapter:
+    """Small, testable REST adapter; it performs no calls at construction."""
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        allow_mutations: bool = False,
+        transport: Transport | None = None,
+    ) -> None:
+        if not isinstance(api_key, str) or not api_key:
+            raise RunPodAdapterError("RunPod API key is required")
+        self.api_key = api_key
+        self.allow_mutations = allow_mutations
+        self._transport = transport or self._http
+
+    def _http(self, method: str, path: str, payload: Mapping[str, object] | None) -> tuple[int, object]:
+        body = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            f"{REST_BASE}{path}", data=body, method=method,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+                return response.status, json.loads(raw.decode("utf-8")) if raw else None
+        except urllib.error.HTTPError as error:
+            raw = error.read()
+            try:
+                detail = json.loads(raw.decode("utf-8")) if raw else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                detail = raw.decode("utf-8", errors="replace")
+            return error.code, detail
+        except urllib.error.URLError as error:
+            raise RunPodAdapterError(f"RunPod REST transport error: {error.reason}") from None
+
+    def _call(self, method: str, path: str, payload: Mapping[str, object] | None = None) -> object:
+        if method in {"POST", "PATCH", "DELETE"} and not self.allow_mutations:
+            raise RunPodAdapterError("RunPod lifecycle mutations are disabled")
+        status, value = self._transport(method, path, payload)
+        if status < 200 or status >= 300:
+            raise RunPodAdapterError(f"RunPod {method} {path} failed with HTTP {status}: {value}")
+        return value
+
+    @staticmethod
+    def _name(session_id: str, resource: str) -> str:
+        return f"runonrunpod-{resource}-{session_id}"
+
+    @staticmethod
+    def _single_named(items: object, name: str, resource: str) -> Mapping[str, object] | None:
+        if not isinstance(items, list):
+            raise RunPodAdapterError(f"RunPod returned invalid {resource} list")
+        matches = [item for item in items if isinstance(item, Mapping) and item.get("name") == name]
+        if len(matches) > 1:
+            raise RunPodAdapterError(f"ambiguous existing {resource} name; manual reconciliation required")
+        return matches[0] if matches else None
+
+    def ensure_volume(self, profile: ManagedProfile, session_id: str) -> Mapping[str, object]:
+        name = self._name(session_id, "volume")
+        existing = self._single_named(self._call("GET", "/networkvolumes"), name, "volume")
+        if existing is not None:
+            # A name is not sufficient ownership proof after an uncertain create.
+            raise RunPodAdapterError("matching volume name is ambiguous; refuse unsafe reuse")
+        created = self._call("POST", "/networkvolumes", {
+            "name": name, "size": profile.volume_size_gb, "dataCenterId": profile.data_center,
+        })
+        if not isinstance(created, Mapping) or not isinstance(created.get("id"), str):
+            raise RunPodAdapterError("RunPod returned invalid volume creation response")
+        if created.get("name") != name or created.get("dataCenterId") != profile.data_center:
+            raise RunPodAdapterError("RunPod volume response does not match requested ownership evidence")
+        return {
+            "id": created["id"], "binding": created["id"], "name": name,
+            "data_center": profile.data_center, "size_gb": profile.volume_size_gb,
+            "ownership": {"name": name, "created_by": "runonrunpod-lifecycle-v1"},
+        }
+
+    def ensure_cpu_endpoint(
+        self, profile: ManagedProfile, session_id: str, volume: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if not profile.cpu_template_id:
+            raise RunPodAdapterError("CPU profile requires cpu.template_id for RunPod endpoint creation")
+        volume_id = volume.get("id")
+        if not isinstance(volume_id, str) or not volume_id:
+            raise RunPodAdapterError("CPU endpoint needs a recorded volume ID")
+        name = self._name(session_id, "cpu")
+        existing = self._single_named(self._call("GET", "/endpoints"), name, "CPU endpoint")
+        if existing is not None:
+            raise RunPodAdapterError("matching CPU endpoint name is ambiguous; refuse unsafe reuse")
+        payload: dict[str, object] = {
+            "name": name, "templateId": profile.cpu_template_id, "computeType": "CPU",
+            "dataCenterIds": [profile.data_center], "networkVolumeId": volume_id,
+            "workersMin": 0, "workersMax": 1, "idleTimeout": profile.idle_timeout_seconds,
+            "executionTimeoutMs": profile.execution_timeout_ms,
+        }
+        if profile.cpu_flavor_ids:
+            payload["cpuFlavorIds"] = list(profile.cpu_flavor_ids)
+        if profile.cpu_vcpu_count is not None:
+            payload["vcpuCount"] = profile.cpu_vcpu_count
+        created = self._call("POST", "/endpoints", payload)
+        return self._verify_cpu_endpoint(created, name, profile, volume_id)
+
+    def _verify_cpu_endpoint(
+        self, value: object, name: str, profile: ManagedProfile, volume_id: str) -> Mapping[str, object]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("id"), str):
+            raise RunPodAdapterError("RunPod returned invalid CPU endpoint creation response")
+        volumes = value.get("networkVolumeIds")
+        attached = value.get("networkVolumeId") == volume_id or (
+            isinstance(volumes, list) and volume_id in volumes
+        )
+        if value.get("computeType") != "CPU" or value.get("name") != name or not attached:
+            raise RunPodAdapterError("RunPod CPU endpoint does not match requested compute/volume binding")
+        if value.get("workersMin") != 0 or value.get("workersMax") != 1:
+            raise RunPodAdapterError("RunPod CPU endpoint violates required worker limits")
+        return {
+            "id": value["id"], "name": name, "compute_type": "CPU", "volume_id": volume_id,
+            "ownership": {"name": name, "created_by": "runonrunpod-lifecycle-v1"},
+        }
+
+    def get_resource(self, resource: str, resource_id: str) -> Mapping[str, object] | None:
+        if resource == "volume":
+            items = self._call("GET", "/networkvolumes")
+            if not isinstance(items, list):
+                raise RunPodAdapterError("RunPod returned invalid volume list")
+            for item in items:
+                if isinstance(item, Mapping) and item.get("id") == resource_id:
+                    return {"id": resource_id, "binding": resource_id, **dict(item)}
+            return None
+        if resource in {"cpu_endpoint", "gpu_endpoint"}:
+            try:
+                value = self._call("GET", f"/endpoints/{resource_id}")
+            except RunPodAdapterError as error:
+                if "HTTP 404" in str(error):
+                    return None
+                raise
+            return dict(value) if isinstance(value, Mapping) else None
+        raise RunPodAdapterError("unsupported RunPod resource type")
+
+    def delete_resource(self, resource: str, resource_id: str) -> None:
+        if resource == "volume":
+            self._call("DELETE", f"/networkvolumes/{resource_id}")
+            return
+        if resource in {"cpu_endpoint", "gpu_endpoint"}:
+            self._call("DELETE", f"/endpoints/{resource_id}")
+            return
+        raise RunPodAdapterError("unsupported RunPod resource type")

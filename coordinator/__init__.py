@@ -2,8 +2,9 @@
 
 from .session_store import CoordinatorError, SessionCoordinator
 from .lifecycle import LifecycleError, ManagedProfile, SessionLifecycleService
+from .runpod_adapter import RunPodAdapterError, RunPodLifecycleAdapter
 
 __all__ = [
     "CoordinatorError", "LifecycleError", "ManagedProfile",
-    "SessionCoordinator", "SessionLifecycleService",
+    "RunPodAdapterError", "RunPodLifecycleAdapter", "SessionCoordinator", "SessionLifecycleService",
 ]
