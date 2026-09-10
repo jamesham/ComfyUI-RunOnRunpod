@@ -7,6 +7,12 @@ the [architecture plan](docs/cpu-staging-session-architecture.md). This is a fut
 implementation plan; the setup and behavior documented below describe the current
 plugin.
 
+Current staging safeguard: before contacting a GPU worker, the plugin compiles
+the workflow's supported model references into a safe, deterministic plan. A
+missing required model now stops submission if it has neither a local copy nor
+a usable configured source. CPU Serverless staging and verified source identity
+are still planned; valid sources retain the existing preparation behavior.
+
 ![Run on Runpod panel](panel.png)
 
 ## Components

@@ -1,6 +1,7 @@
 # CPU staging and disposable creative sessions
 
-Status: proposed architecture; no implementation or deployment is implied.
+Status: proposed architecture with initial local safeguards implemented; no CPU
+staging deployment is implied.
 
 Prepared: 2026-09-10.
 
@@ -14,6 +15,13 @@ keeps the entire remote output set and is reported as a failure rather than an
 empty success. Worker output paths are confined to the local output root. This
 provides the cleanup barrier needed by later disposable-session work; artifact
 checksums and durable retrieval ledgers remain planned.
+
+Also implemented: a versioned, pure model resource-plan compiler records each
+supported workflow model target and its node/input bindings. The submit path
+uses that plan to reject unsafe, ambiguous, or unresolved missing requirements
+before any GPU version or node-capability action. It retains the legacy source
+fetch/upload executor after a plan is complete; source identity materialization
+and replacement with CPU Serverless staging remain planned.
 
 ## 1. Objective and scope
 
@@ -570,9 +578,13 @@ worker image's protocol version, as the current project requires.
 
 - Package/pin the donor core and retain its tests.
 - Define recipe, resource-plan, readiness, profile, and application-session schemas.
-- Extract materialization and reject unresolved required assets.
-- Introduce managed mode and move GPU checks after preparation.
+- Extract source-identity materialization and reject unresolved required assets.
+- Introduce managed mode and move GPU checks after verified CPU preparation.
 - Fix output deletion after failed retrieval immediately.
+
+Progress: local model target/binding compilation and rejection of missing assets
+with no source or local fallback are implemented. The stricter identity,
+readiness, and CPU-stage contracts are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from dataclasses import dataclass
 
 import aiohttp
 from aiohttp import web
@@ -11,6 +12,11 @@ from .s3_utils import get_s3_client, upload_file, upload_file_dedup, download_fi
 from .model_lookup import lookup_model
 from .latency import check_all_regions
 from .output_transfer import OutputRetrievalError, local_output_path, validate_output_path
+from .resource_plan import (
+    ModelRequirement,
+    ResourcePlanError,
+    compile_model_resource_plan,
+)
 
 _PREFIX = "[RunOnRunpod]"
 
@@ -133,28 +139,6 @@ def _find_model_file(subdir: str, filename: str) -> str | None:
         if os.path.exists(fallback):
             return fallback
     return None
-
-
-def _scan_model_files(workflow: dict) -> dict:
-    """Scan workflow for nodes that reference model files.
-
-    Returns dict: {(subdir, filename): node_id}
-    """
-    files = {}
-    for node_id, node in workflow.items():
-        class_type = node.get("class_type", "")
-        fields = MODEL_NODE_FIELDS.get(class_type)
-        if fields is None:
-            continue
-        # Normalize to list of (field, subdir) tuples
-        if isinstance(fields, tuple):
-            fields = [fields]
-        inputs = node.get("inputs", {})
-        for field_name, subdir in fields:
-            filename = inputs.get(field_name)
-            if isinstance(filename, str) and filename:
-                files[(subdir, filename)] = node_id
-    return files
 
 
 def _scan_input_files(workflow: dict) -> dict:
@@ -504,21 +488,21 @@ async def _upload_input_files(settings: dict, bucket: str, workflow: dict, prep_
 async def _identify_missing_models(
     client,
     bucket: str,
-    model_refs: dict,
+    requirements: tuple[ModelRequirement, ...],
     prep_id: str,
-) -> list[tuple[str, str, str | None]]:
-    """Return ``[(subdir, filename, local_path_or_None)]`` for every model
+) -> list[tuple[ModelRequirement, str | None]]:
+    """Return ``[(requirement, local_path_or_None)]`` for every model
     that isn't already on the network volume.
     """
-    missing: list[tuple[str, str, str | None]] = []
-    for (subdir, filename) in model_refs:
+    missing: list[tuple[ModelRequirement, str | None]] = []
+    for requirement in requirements:
         _raise_if_cancelled(prep_id, "model scan")
-        s3_key = f"models/{subdir}/{filename}"
+        s3_key = requirement.target_path
         if await asyncio.to_thread(key_exists, client, bucket, s3_key):
             print(_PREFIX, f"Model already on volume: {s3_key}")
             continue
-        local_path = _find_model_file(subdir, filename)
-        missing.append((subdir, filename, local_path))
+        local_path = _find_model_file(requirement.subdir, requirement.filename)
+        missing.append((requirement, local_path))
     return missing
 
 
@@ -541,11 +525,16 @@ def _workflow_metadata_descriptor(subdir: str, filename: str, wm: dict | None) -
 
 
 async def _resolve_model_sources(
-    missing: list[tuple[str, str, str | None]],
+    missing: list[tuple[ModelRequirement, str | None]],
     workflow_models_by_name: dict[str, dict],
     settings: dict,
     prep_id: str,
-) -> tuple[list[dict], list[tuple[str, str, str]], dict[str, tuple[str, str, str]]]:
+) -> tuple[
+    list[dict],
+    list[tuple[str, str, str]],
+    dict[str, tuple[str, str, str]],
+    list[str],
+]:
     """Split every missing model into worker-fetch vs local-upload buckets.
 
     Preference order: workflow metadata → opt-in lookup chain (Manager /
@@ -565,8 +554,11 @@ async def _resolve_model_sources(
     worker_downloads: list[dict] = []
     upload_queue: list[tuple[str, str, str]] = []
     worker_fallbacks: dict[str, tuple[str, str, str]] = {}
+    unresolved: list[str] = []
 
-    for subdir, filename, local_path in missing:
+    for requirement, local_path in missing:
+        subdir = requirement.subdir
+        filename = requirement.filename
         _raise_if_cancelled(prep_id, "source lookup")
 
         descriptor = _workflow_metadata_descriptor(subdir, filename, workflow_models_by_name.get(filename))
@@ -579,6 +571,11 @@ async def _resolve_model_sources(
             )
 
         if descriptor:
+            if descriptor.get("dest_path") != requirement.target_path:
+                raise _SubmitError(
+                    f"Resolved source has an unsafe target for {requirement.target_path}",
+                    log=f"source target mismatch: {descriptor.get('dest_path')!r}",
+                )
             worker_downloads.append(dict(descriptor))
             if local_path:
                 worker_fallbacks[filename] = (subdir, filename, local_path)
@@ -586,8 +583,9 @@ async def _resolve_model_sources(
             upload_queue.append((subdir, filename, local_path))
         else:
             print(_PREFIX, f"Model not found locally and no source: {subdir}/{filename}")
+            unresolved.append(requirement.target_path)
 
-    return worker_downloads, upload_queue, worker_fallbacks
+    return worker_downloads, upload_queue, worker_fallbacks, unresolved
 
 
 def _build_model_status(
@@ -740,6 +738,95 @@ async def _upload_local_models(
         emit_progress("Uploading models")
 
 
+@dataclass
+class _ModelPreparation:
+    worker_downloads: list[dict]
+    upload_queue: list[tuple[str, str, str]]
+    worker_fallbacks: dict[str, tuple[str, str, str]]
+    planned_order: list[str]
+    model_status: dict[str, dict]
+
+
+async def _plan_model_preparation(
+    settings: dict,
+    bucket: str,
+    client,
+    workflow: dict,
+    workflow_models_by_name: dict[str, dict],
+    prep_id: str,
+) -> _ModelPreparation:
+    """Compile and resolve requirements without starting a GPU worker action."""
+    try:
+        resource_plan = compile_model_resource_plan(workflow, MODEL_NODE_FIELDS)
+    except ResourcePlanError as error:
+        raise _SubmitError(
+            "Workflow contains an unsafe or ambiguous model reference",
+            log=f"resource plan rejected workflow: {error}",
+        ) from None
+
+    requirements = resource_plan.requirements
+    if not requirements:
+        return _ModelPreparation([], [], {}, [], {})
+
+    missing = await _identify_missing_models(client, bucket, requirements, prep_id)
+    if not missing:
+        return _ModelPreparation([], [], {}, [], {})
+
+    if not settings.get("uploadMissingModels", True):
+        targets = ", ".join(requirement.target_path for requirement, _path in missing)
+        raise _SubmitError(
+            f"Required model files are not present on the network volume: {targets}",
+            log=f"automatic model preparation disabled; missing: {targets}",
+        )
+
+    worker_downloads, upload_queue, worker_fallbacks, unresolved = await _resolve_model_sources(
+        missing, workflow_models_by_name, settings, prep_id,
+    )
+    if unresolved:
+        targets = ", ".join(unresolved)
+        raise _SubmitError(
+            f"Required model files have no local copy or usable source: {targets}",
+            log=f"unresolved model targets: {targets}",
+        )
+
+    planned_order, model_status = _build_model_status(worker_downloads, upload_queue)
+    emit_progress = _make_progress_emitter(prep_id, planned_order, model_status)
+    emit_progress("Model preparation planned")
+    return _ModelPreparation(
+        worker_downloads, upload_queue, worker_fallbacks, planned_order, model_status,
+    )
+
+
+async def _execute_model_preparation(
+    preparation: _ModelPreparation,
+    settings: dict,
+    bucket: str,
+    endpoint_id: str,
+    api_key: str,
+    prep_id: str,
+) -> None:
+    """Use the legacy GPU fetch/upload paths for an already-complete plan.
+
+    This seam is the replacement point for the future CPU staging endpoint.
+    """
+    emit_progress = _make_progress_emitter(
+        prep_id, preparation.planned_order, preparation.model_status,
+    )
+
+    if preparation.worker_downloads:
+        await _run_worker_fetches(
+            endpoint_id, api_key, settings,
+            preparation.worker_downloads, preparation.worker_fallbacks,
+            preparation.upload_queue, preparation.planned_order,
+            preparation.model_status, emit_progress,
+        )
+
+    await _upload_local_models(
+        settings, bucket, preparation.upload_queue, prep_id,
+        preparation.model_status, emit_progress,
+    )
+
+
 async def _prepare_models(
     settings: dict,
     bucket: str,
@@ -750,29 +837,12 @@ async def _prepare_models(
     api_key: str,
     prep_id: str,
 ) -> None:
-    """Orchestrate the full model-preparation phase:
-    scan → resolve sources → worker fetches → local uploads.
-    """
-    model_refs = _scan_model_files(workflow)
-    if not model_refs:
-        return
-
-    missing = await _identify_missing_models(client, bucket, model_refs, prep_id)
-    worker_downloads, upload_queue, worker_fallbacks = await _resolve_model_sources(
-        missing, workflow_models_by_name, settings, prep_id,
+    """Compatibility wrapper for callers that still use the old helper."""
+    preparation = await _plan_model_preparation(
+        settings, bucket, client, workflow, workflow_models_by_name, prep_id,
     )
-    planned_order, model_status = _build_model_status(worker_downloads, upload_queue)
-    emit_progress = _make_progress_emitter(prep_id, planned_order, model_status)
-
-    if worker_downloads:
-        await _run_worker_fetches(
-            endpoint_id, api_key, settings,
-            worker_downloads, worker_fallbacks, upload_queue,
-            planned_order, model_status, emit_progress,
-        )
-
-    await _upload_local_models(
-        settings, bucket, upload_queue, prep_id, model_status, emit_progress,
+    await _execute_model_preparation(
+        preparation, settings, bucket, endpoint_id, api_key, prep_id,
     )
 
 
@@ -836,6 +906,10 @@ async def _do_submit(data: dict):
         await _validate_runpod_health(endpoint_id, api_key)
         client = await _validate_s3(settings, bucket)
 
+        model_preparation = await _plan_model_preparation(
+            settings, bucket, client, workflow, workflow_models_by_name, prep_id,
+        )
+
         _send_event("progress", {"prep_id": prep_id, "message": "Waiting for worker..."})
         await _fetch_and_check_worker_version(endpoint_id, api_key)
         _raise_if_cancelled(prep_id, "worker ping")
@@ -846,11 +920,9 @@ async def _do_submit(data: dict):
 
         input_files = await _upload_input_files(settings, bucket, workflow, prep_id)
 
-        if settings.get("uploadMissingModels", True):
-            await _prepare_models(
-                settings, bucket, client, workflow, workflow_models_by_name,
-                endpoint_id, api_key, prep_id,
-            )
+        await _execute_model_preparation(
+            model_preparation, settings, bucket, endpoint_id, api_key, prep_id,
+        )
 
         _send_event("progress", {"prep_id": prep_id, "message": "Submitting to RunPod..."})
         return await _submit_workflow_to_runpod(

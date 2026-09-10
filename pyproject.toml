@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-runonrunpod"
 description = "Run ComfyUI workflows on RunPod Serverless"
-version = "0.3.1"
+version = "0.3.2"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = [
@@ -21,4 +21,3 @@ DisplayName = "Run on RunPod"
 Icon = "https://raw.githubusercontent.com/metebalci/ComfyUI-RunOnRunpod/main/icon.svg"
 includes = ["web"]
 "requires-comfyui" = ">=0.16.4"
-
