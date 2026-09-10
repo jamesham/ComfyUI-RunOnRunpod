@@ -25,12 +25,20 @@ worker behavior until a session coordinator provides a matching signed request.
 `coordinator/` provides the local durable record core for recipes and managed
 sessions, plus a guarded RunPod REST lifecycle adapter. The adapter targets
 network-volume and CPU-endpoint creation, but is not wired to browser settings
-or request routes and rejects all mutations unless an operator explicitly
-enables them in server-side code. Its hermetic tests cover the documented
+or request routes. The operator-only `python -m coordinator.managed_sessions`
+CLI rejects mutations unless `RUNONRUNPOD_MANAGED_LIFECYCLE=enabled`, a local
+existing state root, an operator-owned profile file, and a server-side `RUNPOD_API_KEY`
+are all configured. Its hermetic tests cover the documented
 [network-volume API](https://docs.runpod.io/api-reference/network-volumes/POST/networkvolumes)
 and [endpoint API](https://docs.runpod.io/api-reference/endpoints/POST/endpoints)
 shapes without making provider calls. Ordinary submissions therefore retain
 their existing GPU-worker behavior in this release.
+
+The management CLI is intentionally separate from the frontend. `start` and
+`recover` use the profile chosen by the server environment; `status` reads only
+the durable local record. `end` additionally requires `--outputs-retrieved`
+until a durable output-retrieval ledger is connected, preventing an accidental
+volume deletion from being presented as normal job cleanup.
 
 ![Run on Runpod panel](panel.png)
 

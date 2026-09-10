@@ -66,6 +66,16 @@ the adapter is not yet constructed by routes or browser settings, and its tests
 use a fake HTTP transport only; no live RunPod operation is enabled by this
 increment.
 
+Implemented next: `python -m coordinator.managed_sessions` is an
+operator-only CLI for `start`, `status`, `recover`, and `end`. Mutating commands
+require all of `RUNONRUNPOD_MANAGED_LIFECYCLE=enabled`,
+`RUNONRUNPOD_COORDINATOR_ROOT`, `RUNONRUNPOD_MANAGED_PROFILE_PATH`, and a
+server-side `RUNPOD_API_KEY`; the state root must already exist and the profile supplies the trusted CPU template ID
+and cannot be supplied by browser settings. `end` requires an explicit
+`--outputs-retrieved` acknowledgement until durable output retrieval records
+can enforce that condition automatically. The CLI is not registered as a
+ComfyUI request route.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -626,9 +636,10 @@ Progress: local model target/binding compilation, immutable local/remote
 materialization, volume readiness receipts, and a signed CPU-stage contract
 with a thin CPU image are implemented. Durable recipe/session records, local
 request authorization, a fakeable lifecycle core, and a guarded, hermetically
-tested RunPod REST lifecycle adapter are implemented. The explicit
-upload-install contract, server-side operator configuration/wiring of the
-adapter, and deployed CPU endpoint are outstanding.
+tested RunPod REST lifecycle adapter are implemented. An operator-only,
+environment-gated CLI now wires that adapter without exposing it to browser
+requests. The explicit upload-install contract, durable output-retrieval gate,
+and deployed CPU endpoint are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy
