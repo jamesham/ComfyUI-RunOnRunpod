@@ -58,6 +58,10 @@ PLUGIN_VERSION = _read_plugin_version()
 # MUST be kept in sync with `ARG PROTOCOL_VERSION` in worker/Dockerfile.
 PROTOCOL_VERSION = 2
 
+STAGING_MODE_GPU = "gpu"
+STAGING_MODE_CPU = "cpu"
+_STAGING_MODES = {STAGING_MODE_GPU, STAGING_MODE_CPU}
+
 
 # In-memory state for active jobs: {job_id: asyncio.Task}
 _active_tasks = {}
@@ -398,6 +402,19 @@ def _validate_settings(settings: dict) -> None:
         raise _SubmitError("S3 credentials, endpoint URL, and bucket name are required")
 
 
+def _staging_mode(settings: dict) -> str:
+    """Return the explicit executor selection, preserving GPU compatibility.
+
+    Missing settings come from older browser clients and deliberately mean the
+    legacy GPU path. CPU resources are never selected merely because stale CPU
+    endpoint fields happened to be present in such a request.
+    """
+    mode = settings.get("stagingMode", STAGING_MODE_GPU)
+    if not isinstance(mode, str) or mode not in _STAGING_MODES:
+        raise _SubmitError("Staging mode must be either GPU only or CPU managed staging")
+    return mode
+
+
 async def _validate_runpod_health(endpoint_id: str, api_key: str) -> None:
     try:
         async with aiohttp.ClientSession() as session:
@@ -680,6 +697,9 @@ def _cpu_stager_request(
     coordinator supplies the opaque envelope, which is checked here against the
     exact local materialization before it can replace the legacy GPU fetch.
     """
+    if _staging_mode(settings) == STAGING_MODE_GPU:
+        return None
+
     managed_session_id = settings.get("managedSessionId")
     if managed_session_id:
         state_root = os.environ.get("RUNONRUNPOD_COORDINATOR_ROOT")
@@ -709,7 +729,7 @@ def _cpu_stager_request(
     endpoint_id = settings.get("cpuStagerEndpointId")
     envelope = settings.get("cpuStagerSignedRequest")
     if not endpoint_id and not envelope:
-        return None
+        raise _SubmitError("CPU managed staging requires an endpoint ID and signed coordinator request")
     if not isinstance(endpoint_id, str) or not endpoint_id or envelope is None:
         raise _SubmitError("CPU staging requires an endpoint ID and signed coordinator request")
     try:
@@ -930,13 +950,12 @@ async def _execute_model_preparation(
     api_key: str,
     prep_id: str,
 ) -> None:
-    """Use the legacy GPU fetch/upload paths for an already-complete plan.
-
-    This seam is the replacement point for the future CPU staging endpoint.
-    """
+    """Execute the selected CPU or compatible GPU preparation path."""
     emit_progress = _make_progress_emitter(
         prep_id, preparation.planned_order, preparation.model_status,
     )
+
+    _staging_mode(settings)
 
     # A receipt is the commit record for model bytes. Remove any stale record
     # before replacing an unready target so an interrupted transfer cannot be
@@ -1085,6 +1104,7 @@ async def _do_submit(data: dict):
 
     try:
         _validate_settings(settings)
+        _staging_mode(settings)
 
         _send_event("progress", {"prep_id": prep_id, "message": "Validating credentials..."})
         await _validate_runpod_health(endpoint_id, api_key)

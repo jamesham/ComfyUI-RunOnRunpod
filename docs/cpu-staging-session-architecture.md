@@ -77,6 +77,12 @@ and cannot be supplied by browser settings. `end` requires an explicit
 can enforce that condition automatically. The CLI is not registered as a
 ComfyUI request route.
 
+Implemented next: the existing plugin settings now expose `Model staging mode`.
+The default `gpu` value keeps the main-branch-compatible GPU fetch path even if
+stale CPU fields are present. Selecting `cpu` requires a matching signed CPU
+staging request and fails closed rather than falling back to GPU downloads.
+Hermetic tests cover both executor choices and invalid mode rejection.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -771,8 +777,9 @@ request authorization, a fakeable lifecycle core, and a guarded, hermetically
 tested RunPod REST lifecycle adapter are implemented. An operator-only,
 environment-gated CLI now wires that adapter without exposing it to browser
 requests; replacing its environment API key with the user-plugin credential
-handoff remains outstanding. The explicit upload-install contract, durable
-output-retrieval gate, staging-mode UI, secret injection, and deployed CPU
+handoff remains outstanding. The UI/backend staging-mode contract is
+implemented with GPU compatibility as its default. The explicit upload-install
+contract, durable output-retrieval gate, secret injection, and deployed CPU
 endpoint are outstanding.
 
 Acceptance: hermetic tests prove that CPU mode makes no GPU `/run` request with
@@ -782,8 +789,8 @@ and legacy mode remain functional.
 
 ### Milestone 2: CPU staging on explicitly configured resources
 
-- Add the user-visible `GPU only` / `CPU managed staging` choice, defaulting to
-  GPU only, and persist the chosen mode with the session/run.
+- Persist the already user-visible `GPU only` / `CPU managed staging` choice
+  with the session/run.
 - Build the CPU wrapper/image and configure trusted HMAC and provider secrets
   through RunPod's supported secure-secret/environment mechanism.
 - Add progress, deployment binding, receipts, and upload installation.

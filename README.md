@@ -14,8 +14,10 @@ an immutable configured source. Local files are hashed before upload; remote
 metadata must provide both SHA-256 and byte size unless an opt-in discovery
 result can use a local model's identity. A model is ready only after a matching
 receipt is written to the volume, so existing unverified model objects will be
-restaged. CPU Serverless staging is still planned; until then, the existing
-worker fetch path executes verified remote transfers.
+restaged. **Model staging mode** defaults to *GPU only (compatible)*, retaining
+the existing worker fetch path. *CPU managed staging* is an explicit opt-in and
+requires its separately configured coordinator and CPU endpoint; it never falls
+back to GPU downloads.
 
 The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image
 and signed staging contract for the future CPU Serverless endpoint. It is not

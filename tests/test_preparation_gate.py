@@ -138,7 +138,10 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         payload = stage_request_from_downloads(
             "prep-1", "volume-1", preparation.worker_downloads,
         )
-        configured = dict(self.settings, cpuStagerEndpointId="cpu-endpoint", cpuStagerVolumeBinding="volume-1")
+        configured = dict(
+            self.settings, stagingMode="cpu", cpuStagerEndpointId="cpu-endpoint",
+            cpuStagerVolumeBinding="volume-1",
+        )
         configured["cpuStagerSignedRequest"] = sign_stage_request(payload, "coordinator-key")
         operation = self.routes._cpu_stager_request(configured, preparation, "prep-1")
         self.assertEqual(operation.endpoint_id, "cpu-endpoint")
@@ -168,7 +171,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
                  "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "server-only",
              }, clear=False):
             operation = self.routes._cpu_stager_request(
-                dict(self.settings, managedSessionId="session-1"), preparation, "prep-1",
+                dict(self.settings, stagingMode="cpu", managedSessionId="session-1"), preparation, "prep-1",
             )
         self.assertEqual(operation.endpoint_id, "managed-cpu")
         self.assertEqual(operation.session_id, "session-1")
@@ -176,6 +179,52 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         fake.authorize_stage.assert_called_once_with(
             "session-1", "prep-1", preparation.worker_downloads, "server-only",
         )
+
+    async def test_gpu_mode_is_default_and_uses_legacy_worker_fetch(self):
+        expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
+        metadata = {"base.safetensors": {
+            "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
+            "sha256": expected_sha256, "size": 12,
+        }}
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=None):
+            preparation = await self.routes._plan_model_preparation(
+                self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
+            )
+        legacy_fetch = AsyncMock(return_value={"models/checkpoints/base.safetensors"})
+        cpu_stage = AsyncMock()
+        with patch.object(self.routes, "clear_receipt"), \
+             patch.object(self.routes, "write_receipt"), \
+             patch.object(self.routes, "load_matching_receipt", return_value=object()), \
+             patch.object(self.routes, "_run_worker_fetches", new=legacy_fetch), \
+             patch.object(self.routes, "stage_models_on_cpu", new=cpu_stage):
+            await self.routes._execute_model_preparation(
+                preparation,
+                dict(self.settings, cpuStagerEndpointId="stale-cpu-endpoint"),
+                "volume", Mock(), "gpu-endpoint", "test-key", "prep-1",
+            )
+        legacy_fetch.assert_awaited_once()
+        cpu_stage.assert_not_awaited()
+
+    async def test_cpu_mode_requires_a_cpu_staging_request(self):
+        expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
+        metadata = {"base.safetensors": {
+            "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
+            "sha256": expected_sha256, "size": 12,
+        }}
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=None):
+            preparation = await self.routes._plan_model_preparation(
+                self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
+            )
+        with self.assertRaisesRegex(self.routes._SubmitError, "CPU managed staging requires"):
+            self.routes._cpu_stager_request(
+                dict(self.settings, stagingMode="cpu"), preparation, "prep-1",
+            )
+
+    def test_invalid_staging_mode_is_rejected(self):
+        with self.assertRaisesRegex(self.routes._SubmitError, "Staging mode"):
+            self.routes._staging_mode(dict(self.settings, stagingMode="other"))
 
     async def test_unsafe_reference_blocks_before_storage_or_gpu_work(self):
         unsafe_workflow = {

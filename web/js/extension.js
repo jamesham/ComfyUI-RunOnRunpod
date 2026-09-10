@@ -306,6 +306,7 @@ function getSettings() {
         deleteOutputsAfterJob: app.extensionManager.setting.get("Run on Runpod.Storage.deleteOutputsAfterJob") ?? true,
         uploadMissingModels: app.extensionManager.setting.get("Run on Runpod.Job.uploadMissingModels") ?? true,
         downloadModelsFromTheSource: app.extensionManager.setting.get("Run on Runpod.Job.downloadModelsFromTheSource") ?? false,
+        stagingMode: app.extensionManager.setting.get("Run on Runpod.Job.stagingMode") || "gpu",
         civitaiApiKey: app.extensionManager.setting.get("Run on Runpod.Keys.civitaiApiKey") || "",
         hfToken: app.extensionManager.setting.get("Run on Runpod.Keys.hfToken") || "",
     };
@@ -1225,6 +1226,17 @@ app.registerExtension({
     name: "RunOnRunpod",
 
     settings: [
+        {
+            id: "Run on Runpod.Job.stagingMode",
+            name: "Model staging mode",
+            type: "combo",
+            defaultValue: "gpu",
+            options: [
+                { text: "GPU only (compatible)", value: "gpu" },
+                { text: "CPU managed staging", value: "cpu" },
+            ],
+            tooltip: "GPU only keeps the existing worker download-then-infer flow. CPU managed staging requires a separately configured coordinator and CPU staging endpoint; it never falls back to GPU downloads.",
+        },
         {
             id: "Run on Runpod.Job.downloadModelsFromTheSource",
             name: "Download models from the source when possible",
