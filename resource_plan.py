@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -34,6 +35,24 @@ class ModelRequirement:
 class ModelResourcePlan:
     version: int
     requirements: tuple[ModelRequirement, ...]
+
+
+@dataclass(frozen=True)
+class ModelIdentity:
+    """Immutable byte identity required before a model can be made ready."""
+
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True)
+class MaterializedModel:
+    """A transfer-ready requirement with an exact expected byte identity."""
+
+    requirement: ModelRequirement
+    identity: ModelIdentity
+    local_path: str | None
+    descriptor: dict[str, object] | None
 
 
 def _fields(value: object) -> Sequence[tuple[str, str]]:
@@ -147,3 +166,66 @@ def model_resource_plan_sha256(plan: ModelResourcePlan) -> str:
         model_resource_plan_dict(plan), sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def model_identity(sha256: object, size: object) -> ModelIdentity:
+    """Validate and normalize an externally supplied immutable identity."""
+    if not isinstance(sha256, str) or len(sha256) != 64:
+        raise ResourcePlanError("model SHA-256 must be a 64-character hexadecimal string")
+    try:
+        int(sha256, 16)
+    except ValueError:
+        raise ResourcePlanError("model SHA-256 must be a 64-character hexadecimal string") from None
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise ResourcePlanError("model size must be a non-negative integer")
+    return ModelIdentity(sha256.lower(), size)
+
+
+def local_model_identity(path: str) -> ModelIdentity:
+    """Hash a local file once to turn it into an immutable upload source."""
+    try:
+        size = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError as error:
+        raise ResourcePlanError(f"could not identify local model {path!r}: {error}") from None
+    return ModelIdentity(h.hexdigest(), size)
+
+
+def materialize_model_requirement(
+    requirement: ModelRequirement,
+    local_path: str | None,
+    descriptor: Mapping[str, object] | None,
+) -> MaterializedModel | None:
+    """Choose a local upload or remote source with an exact byte identity.
+
+    A local file always supplies a complete identity. A remote source is usable
+    only when it declares the same strict identity (when a local fallback is
+    present) or declares one itself. Filename-only and mutable-source lookup
+    results are intentionally not materialized.
+    """
+    local_identity = local_model_identity(local_path) if local_path else None
+    if descriptor is not None:
+        if descriptor.get("dest_path") != requirement.target_path:
+            raise ResourcePlanError("source target does not match the model requirement")
+        url = descriptor.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise ResourcePlanError("model source URL must use HTTPS")
+        try:
+            remote_identity = model_identity(
+                descriptor.get("expected_sha256"),
+                descriptor.get("expected_size"),
+            )
+        except ResourcePlanError:
+            remote_identity = None
+        if remote_identity is not None:
+            if local_identity is None or local_identity == remote_identity:
+                return MaterializedModel(
+                    requirement, remote_identity, local_path, dict(descriptor),
+                )
+
+    if local_identity is not None:
+        return MaterializedModel(requirement, local_identity, local_path, None)
+    return None

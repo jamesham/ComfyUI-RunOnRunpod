@@ -20,8 +20,18 @@ Also implemented: a versioned, pure model resource-plan compiler records each
 supported workflow model target and its node/input bindings. The submit path
 uses that plan to reject unsafe, ambiguous, or unresolved missing requirements
 before any GPU version or node-capability action. It retains the legacy source
-fetch/upload executor after a plan is complete; source identity materialization
-and replacement with CPU Serverless staging remain planned.
+fetch/upload executor after a plan is complete; replacement with CPU Serverless
+staging remains planned.
+
+Implemented next: local files are materialized as SHA-256 plus byte size, and
+remote workflow metadata must provide the same immutable identity. A model is
+ready only when its volume object has a matching versioned readiness receipt;
+the receipt is cleared before replacement and published only after size
+verification. Legacy source lookups without exact identities safely fall back
+to a local upload or are rejected. The legacy GPU fetch action now validates
+both expected hash and size and emits the receipt only after completion. This
+is a transitional executor, not the future CPU Serverless stager; its protocol
+is version 2 and requires rebuilding the worker image.
 
 ## 1. Objective and scope
 
@@ -582,9 +592,9 @@ worker image's protocol version, as the current project requires.
 - Introduce managed mode and move GPU checks after verified CPU preparation.
 - Fix output deletion after failed retrieval immediately.
 
-Progress: local model target/binding compilation and rejection of missing assets
-with no source or local fallback are implemented. The stricter identity,
-readiness, and CPU-stage contracts are outstanding.
+Progress: local model target/binding compilation, immutable local/remote
+materialization, and volume readiness receipts are implemented. The durable
+recipe/session schemas, CPU-stage contract, and CPU endpoint are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy

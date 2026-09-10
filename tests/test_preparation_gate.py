@@ -1,8 +1,10 @@
 """The local plan must reject missing requirements before GPU endpoint work."""
 
 import importlib.util
+import hashlib
 from pathlib import Path
 import sys
+import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -44,6 +46,10 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         self.routes = load_routes()
         self.events = patch.object(self.routes, "_send_event").start()
         self.addCleanup(patch.stopall)
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.local_model = Path(self.tempdir.name) / "base.safetensors"
+        self.local_model.write_bytes(b"known local model bytes")
         self.settings = {
             "apiKey": "test-key", "endpointId": "gpu-endpoint", "bucketName": "volume",
             "s3AccessKey": "access", "s3SecretKey": "secret", "endpointUrl": "https://s3.example.invalid",
@@ -54,7 +60,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_unresolved_model_blocks_before_gpu_actions(self):
-        with patch.object(self.routes, "key_exists", return_value=False), \
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
              patch.object(self.routes, "_find_model_file", return_value=None), \
              patch.object(self.routes, "_fetch_and_check_worker_version", new=AsyncMock()) as version, \
              patch.object(self.routes, "_check_node_compatibility", new=AsyncMock()) as nodes, \
@@ -71,15 +77,15 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_preparation_requires_models_to_be_present(self):
         settings = dict(self.settings, uploadMissingModels=False)
-        with patch.object(self.routes, "key_exists", return_value=False), \
-             patch.object(self.routes, "_find_model_file", return_value="/local/base.safetensors"):
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=str(self.local_model)):
             with self.assertRaisesRegex(self.routes._SubmitError, "not present"):
                 await self.routes._plan_model_preparation(
                     settings, "volume", Mock(), self.workflow, {}, "prep-1",
                 )
 
     async def test_present_model_needs_no_gpu_fetch_or_upload(self):
-        with patch.object(self.routes, "key_exists", return_value=True):
+        with patch.object(self.routes, "load_matching_receipt", return_value=object()):
             preparation = await self.routes._plan_model_preparation(
                 dict(self.settings, uploadMissingModels=False), "volume", Mock(), self.workflow, {}, "prep-1",
             )
@@ -87,19 +93,23 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preparation.upload_queue, [])
 
     async def test_local_fallback_becomes_an_explicit_upload_action(self):
-        with patch.object(self.routes, "key_exists", return_value=False), \
-             patch.object(self.routes, "_find_model_file", return_value="/local/base.safetensors"):
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=str(self.local_model)):
             preparation = await self.routes._plan_model_preparation(
-                self.settings, "volume", Mock(), self.workflow, {}, "prep-1",
+            self.settings, "volume", Mock(), self.workflow, {}, "prep-1",
             )
         self.assertEqual(preparation.worker_downloads, [])
         self.assertEqual(preparation.upload_queue, [
-            ("checkpoints", "base.safetensors", "/local/base.safetensors"),
+            ("checkpoints", "base.safetensors", str(self.local_model)),
         ])
 
     async def test_workflow_metadata_produces_an_explicit_worker_fetch_action(self):
-        metadata = {"base.safetensors": {"url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors"}}
-        with patch.object(self.routes, "key_exists", return_value=False), \
+        expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
+        metadata = {"base.safetensors": {
+            "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
+            "sha256": expected_sha256, "size": 12,
+        }}
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
              patch.object(self.routes, "_find_model_file", return_value=None):
             preparation = await self.routes._plan_model_preparation(
                 self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
@@ -108,7 +118,8 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             "source": "workflow",
             "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
             "dest_path": "models/checkpoints/base.safetensors",
-            "expected_sha256": None,
+            "expected_sha256": expected_sha256,
+            "expected_size": 12,
             "auth": "hf",
         }])
 
@@ -116,12 +127,12 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         unsafe_workflow = {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "../escape.safetensors"}},
         }
-        with patch.object(self.routes, "key_exists") as exists:
+        with patch.object(self.routes, "load_matching_receipt") as ready:
             with self.assertRaisesRegex(self.routes._SubmitError, "unsafe or ambiguous"):
                 await self.routes._plan_model_preparation(
                     self.settings, "volume", Mock(), unsafe_workflow, {}, "prep-1",
                 )
-        exists.assert_not_called()
+        ready.assert_not_called()
 
 
 if __name__ == "__main__":

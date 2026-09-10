@@ -52,14 +52,14 @@ RUN while IFS= read -r repo || [ -n "$repo" ]; do \
 # changes deliberately (CUDA/torch bump, custom_nodes edit, handler
 # code change, Dockerfile restructure). Daily ComfyUI rebuilds do NOT
 # bump this; they only change the comfyui part of the image tag.
-ARG WORKER_VERSION=0.1.0
+ARG WORKER_VERSION=0.1.1
 ENV WORKER_VERSION=${WORKER_VERSION}
 
 # Wire-protocol version baked into the env so the worker can report
 # it back via the version action. The plugin uses it for a strict
 # equality check; mismatch is a hard error. MUST be kept in sync with
 # `PROTOCOL_VERSION` in the plugin's routes.py.
-ARG PROTOCOL_VERSION=1
+ARG PROTOCOL_VERSION=2
 ENV PROTOCOL_VERSION=${PROTOCOL_VERSION}
 
 # Copy handler and start script last (changes often, small layer)

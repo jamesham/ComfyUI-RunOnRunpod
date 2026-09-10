@@ -37,6 +37,7 @@ class Descriptor(TypedDict, total=False):
     url: str
     dest_path: str  # models/{subdir}/{filename} on the network volume
     expected_sha256: Optional[str]
+    expected_size: Optional[int]
     auth: str  # "hf" | "civitai" | "none"
 
 
@@ -96,6 +97,21 @@ def file_sha256(path: str) -> Optional[str]:
     cache[key] = digest
     _save_hash_cache(cache)
     return digest
+
+
+def _attach_local_identity(descriptor: Descriptor, local_path: str) -> Descriptor:
+    """Use known local bytes to make a discovery result safe to materialize."""
+    sha256 = file_sha256(local_path)
+    if not sha256:
+        return descriptor
+    try:
+        size = os.path.getsize(local_path)
+    except OSError:
+        return descriptor
+    descriptor = dict(descriptor)
+    descriptor["expected_sha256"] = sha256
+    descriptor["expected_size"] = size
+    return descriptor
 
 
 # -----------------------------------------------------------------------------
@@ -323,7 +339,7 @@ def lookup_model(
     d = lookup_manager(subdir, filename)
     if d is not None:
         print(f"{_PREFIX} Manager DB hit: {filename} -> {d.get('url')}")
-        return d
+        return _attach_local_identity(d, local_path) if local_path else d
 
     if not local_path or not os.path.exists(local_path):
         return None
@@ -332,7 +348,7 @@ def lookup_model(
     d = lookup_hf_cache(local_path, subdir, filename)
     if d is not None:
         print(f"{_PREFIX} HF cache hit: {filename} -> {d.get('url')}")
-        return d
+        return _attach_local_identity(d, local_path)
 
     # 3. CivitAI by hash — sends the SHA-256 externally.
     sha256 = file_sha256(local_path)
@@ -340,6 +356,6 @@ def lookup_model(
         d = lookup_civitai(sha256, subdir, filename, civitai_api_key)
         if d is not None:
             print(f"{_PREFIX} CivitAI hit: {filename} -> {d.get('url')}")
-            return d
+            return _attach_local_identity(d, local_path)
 
     return None

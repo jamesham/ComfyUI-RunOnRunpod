@@ -106,6 +106,7 @@ def download_one(
     url = descriptor.get("url")
     dest_rel = descriptor.get("dest_path")
     expected_sha256 = descriptor.get("expected_sha256")
+    expected_size = descriptor.get("expected_size")
     auth = descriptor.get("auth", "none")
     if not url or not dest_rel:
         raise FetchError("descriptor missing url or dest_path")
@@ -136,3 +137,21 @@ def download_one(
                 f"hash mismatch: expected {expected_sha256}, got {actual}"
             )
         print(f"{_PREFIX} SHA-256 OK")
+
+    if expected_size is not None:
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
+            try:
+                os.remove(dest_abs)
+            except OSError:
+                pass
+            raise FetchError("descriptor has an invalid expected_size")
+        actual_size = os.path.getsize(dest_abs)
+        if actual_size != expected_size:
+            try:
+                os.remove(dest_abs)
+            except OSError:
+                pass
+            raise FetchError(
+                f"size mismatch: expected {expected_size}, got {actual_size}"
+            )
+        print(f"{_PREFIX} size OK")

@@ -8,14 +8,22 @@ import aiohttp
 from aiohttp import web
 from server import PromptServer
 
-from .s3_utils import get_s3_client, upload_file, upload_file_dedup, download_file, delete_objects, list_objects, key_exists
+from .s3_utils import get_s3_client, upload_file, upload_file_dedup, download_file, delete_objects, list_objects
 from .model_lookup import lookup_model
 from .latency import check_all_regions
 from .output_transfer import OutputRetrievalError, local_output_path, validate_output_path
 from .resource_plan import (
+    MaterializedModel,
     ModelRequirement,
     ResourcePlanError,
     compile_model_resource_plan,
+    materialize_model_requirement,
+)
+from .model_readiness import (
+    READINESS_PREFIX,
+    clear_receipt,
+    load_matching_receipt,
+    write_receipt,
 )
 
 _PREFIX = "[RunOnRunpod]"
@@ -41,7 +49,7 @@ PLUGIN_VERSION = _read_plugin_version()
 # Wire-protocol version. Bump this whenever the plugin/worker action
 # protocol changes (action set, input/output shapes, error format).
 # MUST be kept in sync with `ARG PROTOCOL_VERSION` in worker/Dockerfile.
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 # In-memory state for active jobs: {job_id: asyncio.Task}
@@ -491,15 +499,19 @@ async def _identify_missing_models(
     requirements: tuple[ModelRequirement, ...],
     prep_id: str,
 ) -> list[tuple[ModelRequirement, str | None]]:
-    """Return ``[(requirement, local_path_or_None)]`` for every model
-    that isn't already on the network volume.
+    """Return requirements without a matching verified readiness receipt.
+
+    Object existence alone is deliberately insufficient: an interrupted or
+    externally replaced upload must never be submitted as a ready model.
     """
     missing: list[tuple[ModelRequirement, str | None]] = []
     for requirement in requirements:
         _raise_if_cancelled(prep_id, "model scan")
-        s3_key = requirement.target_path
-        if await asyncio.to_thread(key_exists, client, bucket, s3_key):
-            print(_PREFIX, f"Model already on volume: {s3_key}")
+        receipt = await asyncio.to_thread(
+            load_matching_receipt, client, bucket, requirement,
+        )
+        if receipt is not None:
+            print(_PREFIX, f"Verified model already on volume: {requirement.target_path}")
             continue
         local_path = _find_model_file(requirement.subdir, requirement.filename)
         missing.append((requirement, local_path))
@@ -520,6 +532,7 @@ def _workflow_metadata_descriptor(subdir: str, filename: str, wm: dict | None) -
         "url": url,
         "dest_path": f"models/{subdir}/{filename}",
         "expected_sha256": wm.get("hash") or wm.get("sha256"),
+        "expected_size": wm.get("size") or wm.get("bytes"),
         "auth": "hf" if "huggingface.co" in url else "none",
     }
 
@@ -533,6 +546,7 @@ async def _resolve_model_sources(
     list[dict],
     list[tuple[str, str, str]],
     dict[str, tuple[str, str, str]],
+    dict[str, MaterializedModel],
     list[str],
 ]:
     """Split every missing model into worker-fetch vs local-upload buckets.
@@ -554,6 +568,7 @@ async def _resolve_model_sources(
     worker_downloads: list[dict] = []
     upload_queue: list[tuple[str, str, str]] = []
     worker_fallbacks: dict[str, tuple[str, str, str]] = {}
+    materialized: dict[str, MaterializedModel] = {}
     unresolved: list[str] = []
 
     for requirement, local_path in missing:
@@ -570,22 +585,34 @@ async def _resolve_model_sources(
                 lookup_model, subdir, filename, local_path, civitai_key
             )
 
-        if descriptor:
-            if descriptor.get("dest_path") != requirement.target_path:
-                raise _SubmitError(
-                    f"Resolved source has an unsafe target for {requirement.target_path}",
-                    log=f"source target mismatch: {descriptor.get('dest_path')!r}",
-                )
-            worker_downloads.append(dict(descriptor))
-            if local_path:
-                worker_fallbacks[filename] = (subdir, filename, local_path)
-        elif local_path:
-            upload_queue.append((subdir, filename, local_path))
-        else:
+        try:
+            resolved = await asyncio.to_thread(
+                materialize_model_requirement, requirement, local_path, descriptor,
+            )
+        except ResourcePlanError as error:
+            raise _SubmitError(
+                f"Could not materialize an immutable identity for {requirement.target_path}",
+                log=f"model materialization rejected {requirement.target_path}: {error}",
+            ) from None
+
+        if resolved is None:
             print(_PREFIX, f"Model not found locally and no source: {subdir}/{filename}")
             unresolved.append(requirement.target_path)
+            continue
 
-    return worker_downloads, upload_queue, worker_fallbacks, unresolved
+        materialized[requirement.target_path] = resolved
+        if resolved.descriptor is not None:
+            worker_downloads.append(dict(resolved.descriptor))
+            if resolved.local_path:
+                worker_fallbacks[requirement.target_path] = (
+                    subdir, filename, resolved.local_path,
+                )
+        elif resolved.local_path:
+            upload_queue.append((subdir, filename, resolved.local_path))
+        else:  # Defensive: materialize_model_requirement promises one source.
+            unresolved.append(requirement.target_path)
+
+    return worker_downloads, upload_queue, worker_fallbacks, materialized, unresolved
 
 
 def _build_model_status(
@@ -637,7 +664,7 @@ async def _run_worker_fetches(
     planned_order: list[str],
     model_status: dict[str, dict],
     emit_progress,
-) -> None:
+) -> set[str]:
     """Drive the worker's ``fetch_models`` action and, for any files the
     worker couldn't pull, append a local-upload fallback to ``upload_queue``.
     """
@@ -676,25 +703,39 @@ async def _run_worker_fetches(
             for d in worker_downloads
         ]}
 
-    for result in (fetch_output.get("results") or []):
+    results = fetch_output.get("results") or []
+    completed: set[str] = set()
+    failures: list[str] = []
+    for index, descriptor in enumerate(worker_downloads):
+        result = results[index] if index < len(results) and isinstance(results[index], dict) else {}
+        target_path = descriptor["dest_path"]
+        fname = os.path.basename(target_path)
         if result.get("status") == "done":
+            completed.add(target_path)
             continue
-        fname = result.get("filename", "")
-        fallback = worker_fallbacks.get(fname)
+        fallback = worker_fallbacks.get(target_path)
         if fallback:
             print(_PREFIX, f"Worker failed {fname} ({result.get('error')}); falling back to local upload")
             upload_queue.append(fallback)
-            if fname not in model_status:
-                planned_order.append(fname)
             model_status[fname] = {"filename": fname, "status": "pending"}
         else:
             print(_PREFIX, f"Worker failed {fname} with no local fallback available")
+            failures.append(target_path)
+
+    if failures:
+        raise _SubmitError(
+            f"Could not stage required model files: {', '.join(failures)}",
+            log=f"worker source fetch failed for: {', '.join(failures)}",
+        )
+    return completed
 
 
 async def _upload_local_models(
     settings: dict,
     bucket: str,
+    client,
     upload_queue: list[tuple[str, str, str]],
+    materialized: dict[str, MaterializedModel],
     prep_id: str,
     model_status: dict[str, dict],
     emit_progress,
@@ -729,6 +770,11 @@ async def _upload_local_models(
             await asyncio.to_thread(
                 upload_file, _s3_settings(settings), bucket, s3_key, local_path, _model_progress
             )
+            resolved = materialized[s3_key]
+            await asyncio.to_thread(
+                write_receipt, client, bucket, resolved.requirement,
+                resolved.identity, "local-upload",
+            )
             model_status[filename] = {"filename": filename, "status": "done"}
         except Exception as e:
             print(_PREFIX, f"Upload failed for {filename}: {e}")
@@ -740,9 +786,11 @@ async def _upload_local_models(
 
 @dataclass
 class _ModelPreparation:
+    requirements: tuple[ModelRequirement, ...]
     worker_downloads: list[dict]
     upload_queue: list[tuple[str, str, str]]
     worker_fallbacks: dict[str, tuple[str, str, str]]
+    materialized: dict[str, MaterializedModel]
     planned_order: list[str]
     model_status: dict[str, dict]
 
@@ -766,11 +814,11 @@ async def _plan_model_preparation(
 
     requirements = resource_plan.requirements
     if not requirements:
-        return _ModelPreparation([], [], {}, [], {})
+        return _ModelPreparation((), [], [], {}, {}, [], {})
 
     missing = await _identify_missing_models(client, bucket, requirements, prep_id)
     if not missing:
-        return _ModelPreparation([], [], {}, [], {})
+        return _ModelPreparation(requirements, [], [], {}, {}, [], {})
 
     if not settings.get("uploadMissingModels", True):
         targets = ", ".join(requirement.target_path for requirement, _path in missing)
@@ -779,7 +827,7 @@ async def _plan_model_preparation(
             log=f"automatic model preparation disabled; missing: {targets}",
         )
 
-    worker_downloads, upload_queue, worker_fallbacks, unresolved = await _resolve_model_sources(
+    worker_downloads, upload_queue, worker_fallbacks, materialized, unresolved = await _resolve_model_sources(
         missing, workflow_models_by_name, settings, prep_id,
     )
     if unresolved:
@@ -793,7 +841,8 @@ async def _plan_model_preparation(
     emit_progress = _make_progress_emitter(prep_id, planned_order, model_status)
     emit_progress("Model preparation planned")
     return _ModelPreparation(
-        worker_downloads, upload_queue, worker_fallbacks, planned_order, model_status,
+        requirements, worker_downloads, upload_queue, worker_fallbacks, materialized,
+        planned_order, model_status,
     )
 
 
@@ -801,6 +850,7 @@ async def _execute_model_preparation(
     preparation: _ModelPreparation,
     settings: dict,
     bucket: str,
+    client,
     endpoint_id: str,
     api_key: str,
     prep_id: str,
@@ -813,18 +863,41 @@ async def _execute_model_preparation(
         prep_id, preparation.planned_order, preparation.model_status,
     )
 
+    # A receipt is the commit record for model bytes. Remove any stale record
+    # before replacing an unready target so an interrupted transfer cannot be
+    # mistaken for a completed earlier version.
+    for resolved in preparation.materialized.values():
+        await asyncio.to_thread(clear_receipt, client, bucket, resolved.requirement)
+
     if preparation.worker_downloads:
-        await _run_worker_fetches(
+        completed = await _run_worker_fetches(
             endpoint_id, api_key, settings,
             preparation.worker_downloads, preparation.worker_fallbacks,
             preparation.upload_queue, preparation.planned_order,
             preparation.model_status, emit_progress,
         )
+        for target_path in completed:
+            resolved = preparation.materialized[target_path]
+            await asyncio.to_thread(
+                write_receipt, client, bucket, resolved.requirement,
+                resolved.identity, "worker-fetch",
+            )
 
     await _upload_local_models(
-        settings, bucket, preparation.upload_queue, prep_id,
+        settings, bucket, client, preparation.upload_queue, preparation.materialized, prep_id,
         preparation.model_status, emit_progress,
     )
+
+    unready = []
+    for requirement in preparation.requirements:
+        receipt = await asyncio.to_thread(load_matching_receipt, client, bucket, requirement)
+        if receipt is None:
+            unready.append(requirement.target_path)
+    if unready:
+        raise _SubmitError(
+            f"Required model files are not verified ready: {', '.join(unready)}",
+            log=f"missing or invalid readiness receipts: {', '.join(unready)}",
+        )
 
 
 async def _prepare_models(
@@ -842,7 +915,7 @@ async def _prepare_models(
         settings, bucket, client, workflow, workflow_models_by_name, prep_id,
     )
     await _execute_model_preparation(
-        preparation, settings, bucket, endpoint_id, api_key, prep_id,
+        preparation, settings, bucket, client, endpoint_id, api_key, prep_id,
     )
 
 
@@ -921,7 +994,7 @@ async def _do_submit(data: dict):
         input_files = await _upload_input_files(settings, bucket, workflow, prep_id)
 
         await _execute_model_preparation(
-            model_preparation, settings, bucket, endpoint_id, api_key, prep_id,
+            model_preparation, settings, bucket, client, endpoint_id, api_key, prep_id,
         )
 
         _send_event("progress", {"prep_id": prep_id, "message": "Submitting to RunPod..."})
@@ -1371,7 +1444,7 @@ async def clean_storage(request):
     folder = data.get("folder", "")
 
     if folder == "all":
-        prefixes = ["inputs/", "outputs/", "models/"]
+        prefixes = ["inputs/", "outputs/", "models/", READINESS_PREFIX]
     elif folder in ("inputs", "outputs"):
         prefixes = [f"{folder}/"]
     else:

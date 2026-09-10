@@ -10,8 +10,12 @@ plugin.
 Current staging safeguard: before contacting a GPU worker, the plugin compiles
 the workflow's supported model references into a safe, deterministic plan. A
 missing required model now stops submission if it has neither a local copy nor
-a usable configured source. CPU Serverless staging and verified source identity
-are still planned; valid sources retain the existing preparation behavior.
+an immutable configured source. Local files are hashed before upload; remote
+metadata must provide both SHA-256 and byte size unless an opt-in discovery
+result can use a local model's identity. A model is ready only after a matching
+receipt is written to the volume, so existing unverified model objects will be
+restaged. CPU Serverless staging is still planned; until then, the existing
+worker fetch path executes verified remote transfers.
 
 ![Run on Runpod panel](panel.png)
 
