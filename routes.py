@@ -10,6 +10,7 @@ from server import PromptServer
 from .s3_utils import get_s3_client, upload_file, upload_file_dedup, download_file, delete_objects, list_objects, key_exists
 from .model_lookup import lookup_model
 from .latency import check_all_regions
+from .output_transfer import OutputRetrievalError, local_output_path, validate_output_path
 
 _PREFIX = "[RunOnRunpod]"
 
@@ -888,11 +889,13 @@ async def _poll_and_finish(job_id: str, settings: dict, input_files: dict):
             if status == "IN_PROGRESS":
                 _send_event("running", {"job_id": job_id})
             elif status == "COMPLETED":
-                output = result.get("output", {})
-                print(_PREFIX, f"Job {job_id}: COMPLETED, output:\n{json.dumps(output, indent=2)}")
-                output_files = output.get("output_files", [])
-                downloaded = await _download_and_cleanup(settings, output_files, input_files)
-                _send_event("completed", {"job_id": job_id, "files": downloaded})
+                try:
+                    output_files = _completed_output_files(result)
+                    downloaded = await _download_and_cleanup(settings, output_files, input_files)
+                except OutputRetrievalError as e:
+                    _send_event("failed", {"job_id": job_id, "error": str(e)})
+                else:
+                    _send_event("completed", {"job_id": job_id, "files": downloaded})
                 return
             elif status == "FAILED":
                 error = _extract_error(result, "Job failed")
@@ -917,8 +920,23 @@ async def _poll_and_finish(job_id: str, settings: dict, input_files: dict):
         _active_tasks.pop(job_id, None)
 
 
+def _completed_output_files(result: dict) -> list[str]:
+    """A completed provider request is not necessarily a successful workflow."""
+    output = result.get("output")
+    if not isinstance(output, dict) or output.get("error") or output.get("status") != "success":
+        raise OutputRetrievalError(_extract_error(result, "Worker did not report workflow success"))
+    files = output.get("output_files")
+    if not isinstance(files, list):
+        raise OutputRetrievalError("Worker returned an invalid output file list; remote files were kept")
+    return [validate_output_path(path) for path in files]
+
+
 async def _download_and_cleanup(settings: dict, output_files: list, input_files: dict):
-    """Download output files from S3 and optionally clean up."""
+    """Clean up only after every output is completely installed locally.
+
+    Retain the entire remote set on failure so recovery can retry the same worker
+    result without a persistent per-file retrieval ledger.
+    """
     bucket = settings.get("bucketName", "")
     delete_inputs = settings.get("deleteInputsAfterJob", False)
     delete_outputs = settings.get("deleteOutputsAfterJob", True)
@@ -927,28 +945,35 @@ async def _download_and_cleanup(settings: dict, output_files: list, input_files:
         client = _make_s3_client(settings)
     except Exception as e:
         print(_PREFIX, f"S3 client error: {e}")
-        return []
+        raise OutputRetrievalError("Output retrieval failed; remote files were kept on the network volume") from e
 
     downloaded = []
+    failed = []
     if output_files:
         output_dir = _get_output_directory()
         for rel_path in output_files:
             s3_key = f"outputs/{rel_path}"
-            dest = os.path.join(output_dir, rel_path)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            dest = local_output_path(output_dir, rel_path)
             try:
                 _send_event("progress", {"message": f"Downloading: {os.path.basename(rel_path)}"})
                 print(_PREFIX, f"Downloading {s3_key} -> {dest}")
-                download_file(client, bucket, s3_key, dest)
+                await asyncio.to_thread(download_file, client, bucket, s3_key, dest)
                 downloaded.append(rel_path)
             except Exception as e:
                 print(_PREFIX, f"Failed to download {s3_key}: {e}")
+                failed.append(rel_path)
+
+    if failed:
+        raise OutputRetrievalError(
+            f"Could not retrieve {len(failed)} of {len(output_files)} output(s); "
+            "remote files were kept on the network volume"
+        )
 
     if delete_outputs and output_files:
         try:
             s3_keys = [f"outputs/{rel_path}" for rel_path in output_files]
             print(_PREFIX, f"Deleting {len(s3_keys)} output(s) from S3")
-            delete_objects(client, bucket, s3_keys)
+            await asyncio.to_thread(delete_objects, client, bucket, s3_keys)
         except Exception as e:
             print(_PREFIX, f"Failed to delete outputs: {e}")
 
@@ -956,7 +981,7 @@ async def _download_and_cleanup(settings: dict, output_files: list, input_files:
         try:
             s3_keys = list(input_files.values())
             print(_PREFIX, f"Deleting {len(s3_keys)} input(s) from S3")
-            delete_objects(client, bucket, s3_keys)
+            await asyncio.to_thread(delete_objects, client, bucket, s3_keys)
         except Exception as e:
             print(_PREFIX, f"Failed to delete inputs: {e}")
 
@@ -1159,13 +1184,16 @@ async def recover_jobs(request):
             entry: dict = {"job_id": job_id}
 
             if status == "COMPLETED":
-                entry["state"] = "completed"
-                output = result.get("output", {}) or {}
-                output_files = output.get("output_files", []) if isinstance(output, dict) else []
-                # Download outputs to local; pass empty input_files
-                # because the original upload context is gone.
-                downloaded = await _download_and_cleanup(settings, output_files, {})
-                entry["files"] = downloaded
+                try:
+                    output_files = _completed_output_files(result)
+                    # The original input upload context is unavailable.
+                    downloaded = await _download_and_cleanup(settings, output_files, {})
+                except OutputRetrievalError as e:
+                    entry["state"] = "failed"
+                    entry["error"] = str(e)
+                else:
+                    entry["state"] = "completed"
+                    entry["files"] = downloaded
             elif status in ("IN_QUEUE", "IN_PROGRESS"):
                 entry["state"] = "running" if status == "IN_PROGRESS" else "queued"
                 if not already_polling:

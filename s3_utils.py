@@ -14,6 +14,9 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 
+# Preserve the existing import surface for callers.
+from .output_transfer import download_file
+
 # The multipart upload path below closely mirrors the reference script
 # runpod/runpod-s3-examples/upload_large_file.py. RunPod network volumes are
 # POSIX-backed, so CompleteMultipartUpload and checksumming can be very slow
@@ -471,15 +474,6 @@ def upload_file(settings: dict, bucket: str, key: str, file_path: str, progress_
         progress_fn=progress_fn,
     )
     uploader.upload()
-
-
-def download_file(client, bucket: str, key: str, dest: str):
-    """Download an object from S3 to a local path."""
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    resp = client.get_object(Bucket=bucket, Key=key)
-    with open(dest, "wb") as f:
-        for chunk in resp["Body"].iter_chunks(1024 * 1024):
-            f.write(chunk)
 
 
 def delete_objects(client, bucket: str, keys: list[str], max_workers: int = 20):

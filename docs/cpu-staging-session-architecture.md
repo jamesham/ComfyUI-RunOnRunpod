@@ -8,6 +8,13 @@ Source baseline: ComfyUI-RunOnRunpod commit `d5b504d` and the separately
 maintained `runpod-comfy` project at commit `929ab8f`. Source references describe
 those revisions. Reconcile intervening changes before implementation.
 
+Implemented foundation on this branch: output downloads use unique local partial
+files, validate the S3 byte count, and publish atomically. Incomplete retrieval
+keeps the entire remote output set and is reported as a failure rather than an
+empty success. Worker output paths are confined to the local output root. This
+provides the cleanup barrier needed by later disposable-session work; artifact
+checksums and durable retrieval ledgers remain planned.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving

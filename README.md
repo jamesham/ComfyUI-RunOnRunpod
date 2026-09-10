@@ -179,6 +179,11 @@ Input files are deduplicated using content hashing (SHA-256). Each file is store
 
 After a job ends (whether it succeeds or fails), the plugin downloads output files to your local ComfyUI output directory. Two cleanup settings control whether remote files are removed from the network volume afterward:
 
+Output downloads are installed atomically after their S3 byte count has been
+verified. If any output cannot be completely retrieved, the job reports the
+retrieval failure and keeps the complete remote output set so recovery can retry.
+End-to-end content checksums require the planned output-record integration.
+
 - **Delete input files from network volume after job finishes** (default: off) — keeps deduplicated inputs for reuse across jobs
 - **Delete output files from network volume after job finishes** (default: on) — removes remote outputs since they've been downloaded locally
 
