@@ -2,6 +2,11 @@
 
 A ComfyUI plugin that lets you run workflows on [RunPod Serverless](https://www.runpod.io/product/serverless). Adds a sidebar panel to the UI that submits workflows to your RunPod endpoint and tracks job progress.
 
+For the proposed CPU model staging and disposable creative-session design, see
+the [architecture plan](docs/cpu-staging-session-architecture.md). This is a future
+implementation plan; the setup and behavior documented below describe the current
+plugin.
+
 ![Run on Runpod panel](panel.png)
 
 ## Components
