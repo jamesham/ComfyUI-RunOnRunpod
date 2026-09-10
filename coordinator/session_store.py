@@ -118,6 +118,9 @@ class SessionCoordinator:
     def _recipe_path(self, recipe_id: str) -> Path:
         return self.root / "recipes" / recipe_id / "recipe.json"
 
+    def _profile_path(self, profile_id: str) -> Path:
+        return self.root / "profiles" / profile_id / "profile.json"
+
     def _session_path(self, session_id: str) -> Path:
         return self.root / "sessions" / session_id / "session.json"
 
@@ -186,6 +189,130 @@ class SessionCoordinator:
                     "resource_plan_sha256": model_resource_plan_sha256(plan),
                     "resource_plan": model_resource_plan_dict(plan), "models": models,
                 }
+                _atomic_json(path, record)
+                return record
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def save_profile(self, profile_id: str, profile: Mapping[str, object]) -> dict[str, object]:
+        """Persist a validated-by-caller profile without credentials."""
+        profile_id = _id(profile_id, "profile ID")
+        if not isinstance(profile, Mapping):
+            raise CoordinatorError("profile must be an object")
+        path = self._profile_path(profile_id)
+        with self._with_lock(path) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                revision = 1
+                if path.exists():
+                    revision = int(_read_json(path).get("revision", 0)) + 1
+                record = dict(profile)
+                record.update({"profile_id": profile_id, "revision": revision, "updated_at": _now()})
+                _atomic_json(path, record)
+                return record
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def get_profile(self, profile_id: str) -> dict[str, object]:
+        return _read_json(self._profile_path(_id(profile_id, "profile ID")))
+
+    def create_provisioning_session(
+        self,
+        recipe_id: str,
+        profile_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        """Persist session creation intent before any lifecycle provider call."""
+        recipe_id = _id(recipe_id, "recipe ID")
+        profile_id = _id(profile_id, "profile ID")
+        if not self._recipe_path(recipe_id).exists():
+            raise CoordinatorError(f"recipe does not exist: {recipe_id}")
+        if not self._profile_path(profile_id).exists():
+            raise CoordinatorError(f"profile does not exist: {profile_id}")
+        session_id = _id(session_id or uuid.uuid4().hex, "session ID")
+        path = self._session_path(session_id)
+        with self._with_lock(path) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                if path.exists():
+                    raise CoordinatorError(f"session already exists: {session_id}")
+                recipe = _read_json(self._recipe_path(recipe_id))
+                profile = _read_json(self._profile_path(profile_id))
+                record = {
+                    "session_version": SESSION_VERSION, "session_id": session_id,
+                    "recipe_id": recipe_id, "recipe_revision": recipe["revision"],
+                    "profile_id": profile_id, "profile_revision": profile["revision"],
+                    "resource_plan_sha256": recipe["resource_plan_sha256"],
+                    "state": "provisioning", "created_at": _now(), "updated_at": _now(),
+                    "bindings": {
+                        "volume_binding": None, "volume_id": None,
+                        "cpu_endpoint_id": None, "gpu_endpoint_id": None,
+                    },
+                    "resources": {}, "operations": {}, "preparations": {},
+                }
+                _atomic_json(path, record)
+                return record
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def record_lifecycle_operation(
+        self,
+        session_id: str,
+        operation_id: str,
+        *,
+        action: str,
+        resource: str,
+        state: str,
+        result: Mapping[str, object] | None = None,
+        session_state: str | None = None,
+    ) -> dict[str, object]:
+        """Atomically journal a lifecycle transition or provider observation."""
+        session_id = _id(session_id, "session ID")
+        operation_id = _id(operation_id, "operation ID")
+        if action not in {"create", "delete", "reconcile"}:
+            raise CoordinatorError("unsupported lifecycle action")
+        if resource not in {"volume", "cpu_endpoint", "gpu_endpoint"}:
+            raise CoordinatorError("unsupported lifecycle resource")
+        if state not in {"intent", "succeeded", "failed", "confirmed_absent"}:
+            raise CoordinatorError("unsupported lifecycle operation state")
+        path = self._session_path(session_id)
+        with self._with_lock(path) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                record = _read_json(path)
+                operations = record.get("operations")
+                if not isinstance(operations, dict):
+                    raise CoordinatorError("session operations are invalid")
+                entry = {
+                    "action": action, "resource": resource, "state": state,
+                    "updated_at": _now(),
+                }
+                if result is not None:
+                    entry["result"] = dict(result)
+                operations[operation_id] = entry
+                if result is not None and state == "succeeded":
+                    resources = record.setdefault("resources", {})
+                    if not isinstance(resources, dict):
+                        raise CoordinatorError("session resources are invalid")
+                    resources[resource] = dict(result)
+                    bindings = record.get("bindings")
+                    if not isinstance(bindings, dict):
+                        raise CoordinatorError("session bindings are invalid")
+                    if resource == "volume":
+                        bindings["volume_id"] = result.get("id")
+                        bindings["volume_binding"] = result.get("binding")
+                    elif resource == "cpu_endpoint":
+                        bindings["cpu_endpoint_id"] = result.get("id")
+                    elif resource == "gpu_endpoint":
+                        bindings["gpu_endpoint_id"] = result.get("id")
+                if state == "confirmed_absent":
+                    resources = record.setdefault("resources", {})
+                    if isinstance(resources, dict):
+                        resources.pop(resource, None)
+                if session_state is not None:
+                    record["state"] = session_state
+                record["updated_at"] = _now()
                 _atomic_json(path, record)
                 return record
             finally:

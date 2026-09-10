@@ -49,6 +49,14 @@ the exact request. With `managedSessionId`, the route obtains the CPU endpoint
 and signed request from this local state instead of browser settings. Lifecycle
 adapter calls that create, attach, or delete RunPod resources remain unimplemented.
 
+Implemented next: the coordinator has a versioned managed-profile schema and
+a provider-neutral lifecycle service. It journals create/delete intent before
+every provider operation, records exact returned bindings, uses idempotent
+recovery hooks, and closes CPU endpoints before volumes. Its fake-provider
+tests cover partial provisioning and resumable closure. A RunPod-specific
+adapter remains intentionally absent, so this code cannot create billable
+resources until that adapter is implemented and explicitly authorized.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -586,7 +594,6 @@ These future modules do not yet exist:
 | Location | Purpose |
 | --- | --- |
 | `backend/session_client.py` | Coordinator API, managed profiles, frontend event translation. |
-| `coordinator/` | Session API/CLI, journal, recipes, RunPod adapter, recovery. |
 | `schemas/` | Recipe/session/readiness and upload-install contracts. |
 | `tests/` | Hermetic adapters, workflows, lifecycle, frontend contract fixtures. |
 | Shared core dependency | One maintained donor implementation. |
@@ -609,8 +616,9 @@ worker image's protocol version, as the current project requires.
 Progress: local model target/binding compilation, immutable local/remote
 materialization, volume readiness receipts, and a signed CPU-stage contract
 with a thin CPU image are implemented. Durable recipe/session records and
-local request authorization are implemented. The lifecycle adapter, explicit
-upload-install contract, and deployed CPU endpoint are outstanding.
+local request authorization plus a fakeable lifecycle core are implemented.
+The RunPod lifecycle adapter, explicit upload-install contract, and deployed
+CPU endpoint are outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy
