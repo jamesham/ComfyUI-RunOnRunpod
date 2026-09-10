@@ -25,6 +25,12 @@ from .model_readiness import (
     load_matching_receipt,
     write_receipt,
 )
+from .cpu_stager_client import CpuStagerError, stage_models as stage_models_on_cpu
+from .cpu_staging_contract import (
+    CpuStagingContractError,
+    stage_request_from_downloads,
+    unsigned_stage_payload,
+)
 
 _PREFIX = "[RunOnRunpod]"
 
@@ -654,6 +660,40 @@ def _make_progress_emitter(prep_id: str, planned_order: list[str], model_status:
     return emit
 
 
+def _cpu_stager_request(
+    settings: dict,
+    preparation: "_ModelPreparation",
+    prep_id: str,
+) -> tuple[str, object] | None:
+    """Return a coordinator-signed CPU request only when fully configured.
+
+    The browser settings deliberately do not contain the signing key. A future
+    coordinator supplies the opaque envelope, which is checked here against the
+    exact local materialization before it can replace the legacy GPU fetch.
+    """
+    endpoint_id = settings.get("cpuStagerEndpointId")
+    envelope = settings.get("cpuStagerSignedRequest")
+    if not endpoint_id and not envelope:
+        return None
+    if not isinstance(endpoint_id, str) or not endpoint_id or envelope is None:
+        raise _SubmitError("CPU staging requires an endpoint ID and signed coordinator request")
+    try:
+        expected = stage_request_from_downloads(
+            prep_id, settings.get("cpuStagerVolumeBinding", ""), preparation.worker_downloads,
+        )
+        supplied = unsigned_stage_payload(envelope)
+    except CpuStagingContractError as error:
+        raise _SubmitError(
+            "CPU staging request is invalid", log=f"CPU staging contract rejected request: {error}",
+        ) from None
+    if supplied != expected:
+        raise _SubmitError(
+            "CPU staging request does not match this workflow's verified model plan",
+            log="CPU staging signed payload differs from local materialization",
+        )
+    return endpoint_id, envelope
+
+
 async def _run_worker_fetches(
     endpoint_id: str,
     api_key: str,
@@ -870,17 +910,43 @@ async def _execute_model_preparation(
         await asyncio.to_thread(clear_receipt, client, bucket, resolved.requirement)
 
     if preparation.worker_downloads:
-        completed = await _run_worker_fetches(
-            endpoint_id, api_key, settings,
-            preparation.worker_downloads, preparation.worker_fallbacks,
-            preparation.upload_queue, preparation.planned_order,
-            preparation.model_status, emit_progress,
-        )
+        cpu_stage = _cpu_stager_request(settings, preparation, prep_id)
+        if cpu_stage is not None:
+            cpu_endpoint_id, signed_request = cpu_stage
+
+            def _on_cpu_progress(output: dict) -> None:
+                for result in output.get("results") or []:
+                    if not isinstance(result, dict):
+                        continue
+                    filename = os.path.basename(result.get("target_path") or "")
+                    if filename:
+                        preparation.model_status[filename] = {
+                            "filename": filename,
+                            "status": result.get("status", "downloading"),
+                        }
+                emit_progress("CPU staging models")
+
+            try:
+                cpu_result = await stage_models_on_cpu(
+                    cpu_endpoint_id, api_key, signed_request, _on_cpu_progress,
+                )
+            except CpuStagerError as error:
+                raise _SubmitError(
+                    f"CPU model staging failed: {error}", log=f"CPU stager: {error}",
+                ) from None
+            completed = {result["target_path"] for result in cpu_result["results"]}
+        else:
+            completed = await _run_worker_fetches(
+                endpoint_id, api_key, settings,
+                preparation.worker_downloads, preparation.worker_fallbacks,
+                preparation.upload_queue, preparation.planned_order,
+                preparation.model_status, emit_progress,
+            )
         for target_path in completed:
             resolved = preparation.materialized[target_path]
             await asyncio.to_thread(
-                write_receipt, client, bucket, resolved.requirement,
-                resolved.identity, "worker-fetch",
+                write_receipt, client, bucket, resolved.requirement, resolved.identity,
+                "cpu-stager" if cpu_stage is not None else "worker-fetch",
             )
 
     await _upload_local_models(

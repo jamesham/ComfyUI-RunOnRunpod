@@ -33,6 +33,15 @@ both expected hash and size and emits the receipt only after completion. This
 is a transitional executor, not the future CPU Serverless stager; its protocol
 is version 2 and requires rebuilding the worker image.
 
+Implemented next: `cpu_staging_contract.py` defines CPU staging protocol v1,
+strict request/result validation, target confinement, exact identities, volume
+binding, and HMAC-signed coordinator envelopes. `worker-cpu/` is a thin
+CPU-only Serverless image that validates this envelope before downloading or
+writing. `cpu_stager_client.py` is wired as an opt-in replacement for the
+legacy GPU fetch action only when a matching coordinator-signed request is
+present. No CPU endpoint is deployed or enabled by browser settings, and no
+live RunPod operation has been performed.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -565,14 +574,12 @@ convention; this does not sandbox a hostile writer sharing the volume.
 
 ## 12. Proposed implementation structure
 
-These modules are proposed and do not yet exist:
+These future modules do not yet exist:
 
 | Location | Purpose |
 | --- | --- |
 | `backend/session_client.py` | Coordinator API, managed profiles, frontend event translation. |
-| `backend/resource_plan.py` | Workflow bindings and exact-source materialization. |
 | `coordinator/` | Session API/CLI, journal, recipes, RunPod adapter, recovery. |
-| `worker-cpu/` | Thin CPU entrypoint and digest-pinned image. |
 | `schemas/` | Recipe/session/readiness and upload-install contracts. |
 | `tests/` | Hermetic adapters, workflows, lifecycle, frontend contract fixtures. |
 | Shared core dependency | One maintained donor implementation. |
@@ -593,8 +600,10 @@ worker image's protocol version, as the current project requires.
 - Fix output deletion after failed retrieval immediately.
 
 Progress: local model target/binding compilation, immutable local/remote
-materialization, and volume readiness receipts are implemented. The durable
-recipe/session schemas, CPU-stage contract, and CPU endpoint are outstanding.
+materialization, volume readiness receipts, and a signed CPU-stage contract
+with a thin CPU image are implemented. The durable recipe/session schemas,
+coordinator, explicit upload-install contract, and deployed CPU endpoint are
+outstanding.
 
 Acceptance: hermetic tests prove no GPU `/run` request occurs with unresolved,
 staging, failed, or uninstalled requirements. Frontend event consumers and legacy

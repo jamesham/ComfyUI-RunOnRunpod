@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import output_transfer
+from cpu_staging_contract import sign_stage_request, stage_request_from_downloads
 
 
 def load_routes():
@@ -122,6 +123,30 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             "expected_size": 12,
             "auth": "hf",
         }])
+
+    async def test_cpu_stager_requires_a_signed_request_for_exact_plan(self):
+        expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
+        metadata = {"base.safetensors": {
+            "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
+            "sha256": expected_sha256, "size": 12,
+        }}
+        with patch.object(self.routes, "load_matching_receipt", return_value=None), \
+             patch.object(self.routes, "_find_model_file", return_value=None):
+            preparation = await self.routes._plan_model_preparation(
+                self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
+            )
+        payload = stage_request_from_downloads(
+            "prep-1", "volume-1", preparation.worker_downloads,
+        )
+        configured = dict(self.settings, cpuStagerEndpointId="cpu-endpoint", cpuStagerVolumeBinding="volume-1")
+        configured["cpuStagerSignedRequest"] = sign_stage_request(payload, "coordinator-key")
+        self.assertEqual(
+            self.routes._cpu_stager_request(configured, preparation, "prep-1"),
+            ("cpu-endpoint", configured["cpuStagerSignedRequest"]),
+        )
+        configured["cpuStagerSignedRequest"]["payload"]["models"][0]["expected_size"] = 13
+        with self.assertRaisesRegex(self.routes._SubmitError, "does not match"):
+            self.routes._cpu_stager_request(configured, preparation, "prep-1")
 
     async def test_unsafe_reference_blocks_before_storage_or_gpu_work(self):
         unsafe_workflow = {

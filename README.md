@@ -17,6 +17,11 @@ receipt is written to the volume, so existing unverified model objects will be
 restaged. CPU Serverless staging is still planned; until then, the existing
 worker fetch path executes verified remote transfers.
 
+The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image
+and signed staging contract for the future CPU Serverless endpoint. It is not
+deployed or enabled by default; ordinary submissions keep their current GPU
+worker behavior until a session coordinator provides a matching signed request.
+
 ![Run on Runpod panel](panel.png)
 
 ## Components
