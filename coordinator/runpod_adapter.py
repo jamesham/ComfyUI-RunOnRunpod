@@ -119,6 +119,12 @@ class RunPodLifecycleAdapter:
             "workersMin": 0, "workersMax": 1, "idleTimeout": profile.idle_timeout_seconds,
             "executionTimeoutMs": profile.execution_timeout_ms,
         }
+        environment = dict(profile.cpu_environment)
+        configured_binding = environment.get("STAGING_VOLUME_BINDING")
+        if configured_binding is not None and configured_binding != volume_id:
+            raise RunPodAdapterError("CPU environment binding conflicts with recorded volume ID")
+        environment["STAGING_VOLUME_BINDING"] = volume_id
+        payload["env"] = environment
         if profile.cpu_flavor_ids:
             payload["cpuFlavorIds"] = list(profile.cpu_flavor_ids)
         if profile.cpu_vcpu_count is not None:

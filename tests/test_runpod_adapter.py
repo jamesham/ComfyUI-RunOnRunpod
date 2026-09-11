@@ -82,10 +82,33 @@ class RunPodAdapterTests(unittest.TestCase):
             "name": "runonrunpod-cpu-session-1", "templateId": "template-cpu",
             "computeType": "CPU", "dataCenterIds": ["dc-1"], "networkVolumeId": "vol-1",
             "workersMin": 0, "workersMax": 1, "idleTimeout": 5,
-            "executionTimeoutMs": 3_600_000, "cpuFlavorIds": ["cpu3c"], "vcpuCount": 4,
+            "executionTimeoutMs": 3_600_000, "env": {"STAGING_VOLUME_BINDING": "vol-1"},
+            "cpuFlavorIds": ["cpu3c"], "vcpuCount": 4,
         })
         self.assertEqual(endpoint["volume_id"], "vol-1")
         self.assertEqual(endpoint["ownership"]["name"], "runonrunpod-cpu-session-1")
+
+    def test_endpoint_environment_keeps_secret_references_and_sets_volume_binding(self):
+        profile = ManagedProfile(
+            "profile-1", "dc-1", 100, "cpu-image@sha256:abc", cpu_template_id="template-cpu",
+            cpu_environment=(("HF_TOKEN", "{{ RUNPOD_SECRET_hf_test }}"),),
+        )
+        adapter = self.adapter()
+        volume = adapter.ensure_volume(profile, "session-1")
+        adapter.ensure_cpu_endpoint(profile, "session-1", volume)
+        self.assertEqual(self.rest.requests[-1][2]["env"], {
+            "HF_TOKEN": "{{ RUNPOD_SECRET_hf_test }}", "STAGING_VOLUME_BINDING": "vol-1",
+        })
+
+    def test_rejects_conflicting_configured_volume_binding(self):
+        profile = ManagedProfile(
+            "profile-1", "dc-1", 100, "cpu-image@sha256:abc", cpu_template_id="template-cpu",
+            cpu_environment=(("STAGING_VOLUME_BINDING", "other-volume"),),
+        )
+        adapter = self.adapter()
+        volume = adapter.ensure_volume(profile, "session-1")
+        with self.assertRaisesRegex(RunPodAdapterError, "binding conflicts"):
+            adapter.ensure_cpu_endpoint(profile, "session-1", volume)
 
     def test_refuses_matching_name_without_recorded_ownership(self):
         self.rest.volumes["outside-volume"] = {

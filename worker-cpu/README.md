@@ -10,9 +10,12 @@ Required deployment configuration:
 - Mount the creative-session network volume at `/runpod-volume` (or set
   `STAGING_VOLUME_DIR`).
 - Set `STAGING_VOLUME_BINDING` to the coordinator's immutable binding value.
-- Set `STAGING_REQUEST_HMAC_KEY` as a secret shared only with the coordinator.
+- Set `STAGING_REQUEST_HMAC_KEY` as a RunPod stored-secret environment mapping
+  shared only with the coordinator, for example
+  `STAGING_REQUEST_HMAC_KEY={{ RUNPOD_SECRET_cpu_staging_hmac }}`.
 - Configure provider credentials such as `HF_TOKEN` and `CIVITAI_API_KEY` as
-  CPU deployment secrets, never browser settings.
+  RunPod stored-secret environment mappings, never browser settings or job
+  payload fields.
 
 Build from repository root:
 

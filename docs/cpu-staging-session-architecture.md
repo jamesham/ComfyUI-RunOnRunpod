@@ -83,6 +83,14 @@ stale CPU fields are present. Selecting `cpu` requires a matching signed CPU
 staging request and fails closed rather than falling back to GPU downloads.
 Hermetic tests cover both executor choices and invalid mode rejection.
 
+Implemented next: `integration/runpod_cpu_stager_smoke.py` is an explicitly
+opt-in live harness (`--live`) for the CPU path. It uses the coordinator,
+lifecycle adapter, secret-reference endpoint environment mapping, signed request,
+CPU client, and cleanup flow to create one temporary volume/CPU endpoint, stage
+one pinned download, and delete the exact recorded resources. `--pause-after-create`
+allows RunPod-console inspection before staging and cleanup. It is never run by
+ordinary test discovery and has not been run against a live account here.
+
 ## 1. Objective and scope
 
 Preserve ComfyUI-RunOnRunpod's frontend and creative workflow while moving
@@ -275,12 +283,13 @@ attempt to test, retrieve, or echo the secret value.
 
 RunPod documents Serverless runtime environment variables configured in the
 console, and separately documents encrypted stored Secrets and template
-references. The public documentation currently found for stored-secret
-references is Pod-template scoped; therefore, before relying on a
-`RUNPOD_SECRET_*` reference for a Serverless endpoint, verify that the current
-RunPod console supports that reference for the selected Serverless deployment
-type. Use the provider's secret selector/mechanism rather than copying a token
-into a plain endpoint environment field.
+references. This architecture assumes the published
+`{{ RUNPOD_SECRET_<name> }}` reference behavior is consistent for Serverless
+endpoint environment mappings and the RunPod API unless RunPod demonstrates
+otherwise. Use the provider's secret selector/mechanism rather than copying a
+token into a plain endpoint environment field. The opt-in live CPU smoke
+harness tests the endpoint creation and one authenticated staging download with
+user-supplied secret names.
 
 If RunPod publishes a supported secret-management REST API for Serverless,
 plugin-assisted enrollment may be added behind an explicit user action: the
@@ -881,9 +890,9 @@ These decisions are not authorization to deploy:
 7. Warm ComfyUI model discovery and output-record path mapping.
 8. Any unattended expiration policy, distinct from ordinary scale-to-zero and
    constrained by output retention.
-9. Confirmed Serverless support for RunPod stored-secret references and whether
-   a documented Serverless secret CRUD API becomes available; no plugin secret
-   upload is authorized until both are verified.
+9. Record results from the live secret-reference smoke test and determine
+   whether a documented Serverless secret CRUD API becomes available; no plugin
+   secret upload is authorized until the API is verified.
 
 ## 17. References
 
@@ -896,6 +905,8 @@ Local implementation:
 - [GPU handler](../worker/handler.py)
 - [GPU startup](../worker/start.sh)
 - [Current GPU downloader](../worker/model_fetcher.py)
+- [Live CPU stager smoke harness](../integration/runpod_cpu_stager_smoke.py)
+- [Smoke-harness instructions](runpod-cpu-stager-smoke-test.md)
 
 Donor paths relative to the separate `runpod-comfy` repository:
 

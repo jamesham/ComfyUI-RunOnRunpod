@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import re
 from typing import Callable, Mapping, Protocol
 
 from .session_store import CoordinatorError, SessionCoordinator
 
 
 PROFILE_VERSION = 1
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class LifecycleError(RuntimeError):
@@ -33,6 +35,7 @@ class ManagedProfile:
     cpu_vcpu_count: int | None = None
     idle_timeout_seconds: int = 5
     execution_timeout_ms: int = 3_600_000
+    cpu_environment: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "ManagedProfile":
@@ -73,9 +76,17 @@ class ManagedProfile:
             raise LifecycleError("cpu.idle_timeout_seconds must be non-negative")
         if isinstance(execution_timeout, bool) or not isinstance(execution_timeout, int) or execution_timeout < 1:
             raise LifecycleError("cpu.execution_timeout_ms must be positive")
+        environment = cpu.get("environment", {})
+        if not isinstance(environment, Mapping) or not all(
+            isinstance(name, str) and _ENVIRONMENT_NAME.fullmatch(name)
+            and isinstance(content, str) and content
+            for name, content in environment.items()
+        ):
+            raise LifecycleError("cpu.environment must map environment names to non-empty strings")
         return cls(
             profile_id, data_center, volume["size_gb"], cpu["image"], gpu_image,
             template_id, tuple(flavors), vcpu_count, idle_timeout, execution_timeout,
+            tuple(sorted(environment.items())),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -88,6 +99,7 @@ class ManagedProfile:
                 "template_id": self.cpu_template_id, "flavor_ids": list(self.cpu_flavor_ids),
                 "vcpu_count": self.cpu_vcpu_count, "idle_timeout_seconds": self.idle_timeout_seconds,
                 "execution_timeout_ms": self.execution_timeout_ms,
+                "environment": dict(self.cpu_environment),
             },
         }
         if self.gpu_image:
