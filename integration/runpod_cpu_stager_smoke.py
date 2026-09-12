@@ -1,8 +1,10 @@
 """Opt-in live smoke test for a disposable RunPod CPU staging session.
 
 This script intentionally cannot run without ``--live``. It creates billable
-RunPod resources and always attempts to delete only the exact resources recorded
-by the coordinator. It does not print API keys, HMAC values, or secret values.
+RunPod resources, verifies both refusal of an invalid signed request and
+successful processing of a valid request, and always attempts to delete only
+the exact resources recorded by the coordinator. It does not print API keys,
+HMAC values, or secret values.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ _SECRET_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _SENSITIVE_DEBUG_FIELDS = frozenset({
     "authorization", "apikey", "token", "secret", "password", "credential", "hmac",
 })
+_REJECTION_PREPARATION_ID = "smoke-signature-rejection"
+_SUCCESS_PREPARATION_ID = "smoke-stage"
 
 
 def _secret_reference(name: str) -> str:
@@ -89,10 +93,6 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="required acknowledgement of billable provider operations")
     parser.add_argument("--pause-after-create", action="store_true", help="wait for Enter after creation before staging and cleanup")
     parser.add_argument("--debug", action="store_true", help="log redacted RunPod API requests and results to stderr")
-    parser.add_argument(
-        "--corrupt-signature", action="store_true",
-        help="submit a deliberately invalid signature and require CPU-worker refusal",
-    )
     parser.add_argument("--api-key-env", default="RUNPOD_API_KEY", help="environment variable holding the RunPod API key")
     parser.add_argument("--signing-key-env", default="RUNONRUNPOD_CPU_STAGING_SIGNING_KEY", help="environment variable holding the CPU HMAC value")
     parser.add_argument("--data-center", required=True, help="RunPod data-center ID for volume and CPU endpoint")
@@ -204,26 +204,34 @@ def run(argv: Sequence[str] | None = None) -> int:
         print("Secret mappings requested: STAGING_REQUEST_HMAC_KEY and "
               f"{'HF_TOKEN' if arguments.provider == 'hf' else 'CIVITAI_API_KEY'}", flush=True)
         if arguments.pause_after_create:
-            input("Inspect RunPod now. Press Enter to stage one download and clean up these resources. ")
+            input("Inspect RunPod now. Press Enter to validate refusal, stage one download, and clean up these resources. ")
 
-        envelope = coordinator.authorize_stage(session_id, "smoke-stage", [download], signing_key)
-        if arguments.corrupt_signature:
-            envelope = _corrupt_signature(envelope)
         endpoint_id = session["bindings"]["cpu_endpoint_id"]
+
+        rejection_envelope = _corrupt_signature(coordinator.authorize_stage(
+            session_id, _REJECTION_PREPARATION_ID, [download], signing_key,
+        ))
         try:
-            result = asyncio.run(stage_models(
-                endpoint_id, api_key, envelope, timeout_seconds=arguments.stage_timeout_seconds,
+            asyncio.run(stage_models(
+                endpoint_id, api_key, rejection_envelope, timeout_seconds=arguments.stage_timeout_seconds,
                 on_api_call=debug_call,
             ))
         except CpuStagerError as error:
-            if not arguments.corrupt_signature or "signature" not in str(error).casefold():
+            if "signature" not in str(error).casefold():
                 raise
             print("SIGNATURE REJECTED", {"reason": str(error)}, flush=True)
         else:
-            if arguments.corrupt_signature:
-                raise RuntimeError("CPU stager accepted a deliberately corrupted signature")
-            coordinator.record_stage_result(session_id, "smoke-stage", result)
-            print("STAGED", {"target_path": download["dest_path"], "sha256": arguments.sha256, "size": arguments.size}, flush=True)
+            raise RuntimeError("CPU stager accepted a deliberately corrupted signature")
+
+        success_envelope = coordinator.authorize_stage(
+            session_id, _SUCCESS_PREPARATION_ID, [download], signing_key,
+        )
+        result = asyncio.run(stage_models(
+            endpoint_id, api_key, success_envelope, timeout_seconds=arguments.stage_timeout_seconds,
+            on_api_call=debug_call,
+        ))
+        coordinator.record_stage_result(session_id, _SUCCESS_PREPARATION_ID, result)
+        print("STAGED", {"target_path": download["dest_path"], "sha256": arguments.sha256, "size": arguments.size}, flush=True)
         outcome = 0
     except Exception as error:
         print(f"SMOKE TEST FAILED: {error}", file=sys.stderr, flush=True)

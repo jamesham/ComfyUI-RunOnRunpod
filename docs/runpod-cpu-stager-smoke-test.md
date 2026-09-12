@@ -11,8 +11,10 @@ signed CPU-staging contract, CPU client, and CPU worker protocol to:
 2. create one CPU Serverless endpoint attached to that exact volume;
 3. configure the CPU endpoint with the required secret references and dynamic
    `STAGING_VOLUME_BINDING` environment variable;
-4. submit exactly one signed, identity-pinned download;
-5. validate the CPU result through the shared contract and record it; and
+4. submit a deliberately corrupted signed request and require worker refusal;
+5. submit one valid, identity-pinned download using the same endpoint and
+   volume, then validate and record the CPU result through the shared contract;
+   and
 6. delete the exact recorded CPU endpoint and volume, confirming absence.
 
 It never prints API keys, HMAC values, provider-token values, or endpoint
@@ -84,8 +86,8 @@ python -m integration.runpod_cpu_stager_smoke \
 Add `--pause-after-create` to stop immediately after the CPU endpoint and
 volume are created. Inspect their compute type, min/max worker counts, shared
 volume attachment, and environment-variable *names* in RunPod. Press Enter to
-resume the single download and cleanup. Without the flag, the harness proceeds
-non-interactively.
+resume the signature-refusal check, single download, and cleanup. Without the
+flag, the harness proceeds non-interactively.
 
 Add `--debug` to write a line for every RunPod lifecycle and Serverless API
 call to stderr. Each line includes the method, path, HTTP status, and a
@@ -95,10 +97,11 @@ tokens, and all endpoint environment-variable values are redacted. The signed
 signature can be inspected. It does not contain the HMAC key, but it may
 contain model-source URLs and should be treated as operationally sensitive.
 
-Add `--corrupt-signature` to submit the same model specification with one
-signature nibble changed. This is a successful smoke-test outcome only when the
-CPU worker explicitly rejects it for a signature error; no model download should
-begin. The harness still deletes the temporary endpoint and volume.
+Every live invocation first submits the model specification with one signature
+nibble changed. This is a successful smoke-test outcome only when the CPU
+worker explicitly rejects it for a signature error; no model download should
+begin. Without recreating the endpoint or volume, the harness then submits the
+valid envelope and requires the download to complete successfully.
 
 ## Cleanup and failure behavior
 
