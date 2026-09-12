@@ -131,6 +131,8 @@ Requirements:
   resources, or repeatedly entering resource IDs.
 - Never delete the only retained copy of requested outputs during cleanup.
 - Persist recovery information independently of the disposable volume.
+- Every HTTP request to a RunPod-operated API must explicitly set a project
+  User-Agent header; client-library default User-Agent values are prohibited.
 
 Non-goals for the initial implementation:
 
@@ -258,6 +260,25 @@ Its [volume documentation](https://docs.runpod.io/storage/network-volumes)
 describes the `/runpod-volume` Serverless mount and shared-volume constraints.
 These establish capability, not current availability in a particular account or
 data center. Recheck availability before deployment.
+
+### RunPod API request identification
+
+This is a required integration specification for every HTTP request sent to a
+RunPod-operated API: the v1/v2 control and catalog APIs, the Serverless job API,
+and any RunPod S3-compatible API used by the GPU-only compatibility path. Each
+request **MUST** explicitly set `User-Agent`; it must override a value supplied
+by Python, an HTTP client, or an SDK by default. A default value such as
+`Python-urllib/<version>` is non-compliant.
+
+The value must identify this project, the sending component, and that
+component's release version, for example
+`ComfyUI-RunOnRunpod-DatacenterAvailability/0.3.1`. It must not contain an API
+key, provider token, session ID, workflow content, user identity, or other
+secret/personal data. Shared RunPod transport helpers should set the header at
+construction; every direct request path must do the same. Tests for each
+transport must assert the explicit value, including failure paths where the
+request is observable. Debug output may display the User-Agent but must
+continue to redact authorization and cookie values.
 
 ## 5. Credentials and secret delivery
 
