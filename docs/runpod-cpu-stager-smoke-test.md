@@ -19,6 +19,14 @@ It never prints API keys, HMAC values, provider-token values, or endpoint
 environment values. It does print the temporary session, volume, and endpoint
 IDs so the operator can inspect them.
 
+This harness exercises the CPU staging data plane without using RunPod S3. It
+does not yet prove that a full CPU-managed creative session is S3-free: normal
+plugin input transfer, local-model fallback, readiness records, output
+retrieval, and cleanup still use the legacy S3 path. The architecture requires
+those CPU-mode dependencies to be removed before CPU-managed staging is
+considered complete; that future change must leave GPU-only S3 behavior
+unchanged.
+
 ## Preconditions
 
 - A RunPod API key with authority to create/delete a network volume and CPU

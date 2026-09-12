@@ -113,8 +113,16 @@ Requirements:
   settings, output previews, and existing file-cleanup actions.
 - Make the staging mode visible and explicit: `cpu` or `gpu`.
 - Never use the GPU endpoint to download source assets in CPU-managed mode.
+- Before CPU-managed staging is declared complete, make its end-to-end session
+  path S3-free: input transfer, local-model installation fallback, readiness
+  evidence, output retrieval, and cleanup must not require a RunPod S3-enabled
+  data center, bucket, access key, secret key, or S3-compatible API. A generic
+  authenticated HTTPS artifact-transfer boundary is acceptable; moving the
+  dependency to an external S3-compatible service is not sufficient.
 - Preserve the GPU-only download/stage/infer sequence when `gpu` is selected;
   require only narrowly scoped safety and protocol consistency changes.
+- This S3-removal requirement applies only to CPU-managed staging. GPU-only
+  staging retains its existing RunPod-S3 transport and compatibility behavior.
 - In CPU mode, do not submit GPU liveness or capability jobs while preparing
   content; preserve GPU-only ordering for compatibility.
 - Block inference until every required asset has a matching verified receipt.
@@ -262,6 +270,15 @@ recipes, profiles, session records, progress events, logs, job payloads, or
 worker images. The plugin must treat values received from browser settings as
 request-scoped secrets, redact them from exceptions, and discard them when the
 request/background job no longer needs them.
+
+Those S3 credentials remain part of the compatible GPU-only path. They are a
+transitional CPU-mode implementation detail, not a completion requirement for
+CPU-managed staging. Before CPU mode is declared complete, replace its S3
+operations with a transport-neutral authenticated HTTPS artifact boundary for
+inputs, local-model fallback, readiness evidence, output retrieval, and
+cleanup. CPU mode must not require any S3 endpoint, bucket, or S3 credential
+from the user or the selected RunPod data center. Do not change the GPU-only
+mode's S3 settings, credential handling, or data path as part of that work.
 
 Hugging Face and CivitAI credentials follow a stronger worker-delivery rule:
 
@@ -806,13 +823,19 @@ and legacy mode remain functional.
 - Connect preparation to the separate CPU endpoint.
 - Validate GPU mounts and disable managed GPU fetching.
 - Implement CPU cancellation and durable job recovery.
+- Define and implement the CPU-mode S3-free artifact-transfer boundary. It
+  must carry inputs, local-model fallback payloads, receipts, outputs, and
+  cleanup/retrieval records without a RunPod-S3 or generic S3 dependency;
+  retain the current S3 implementation untouched for GPU-only mode.
 
 Acceptance: fake-client integration covers provider staging, reuse, upload
 fallback, corruption, duplicate submissions, cancellation, and rejection of
 provider-token job payloads. An explicitly authorized live test demonstrates
 CPU writes visible before GPU inference. CPU-mode GPU workers have no
 model-provider credentials; GPU-only workers receive only the user-selected
-RunPod-injected provider secrets.
+RunPod-injected provider secrets. CPU mode has no S3 settings or credentials
+and succeeds in a data center without RunPod S3 support; GPU-only mode retains
+its existing S3-backed behavior.
 
 ### Milestone 3: Recipes and managed lifecycle
 
@@ -850,7 +873,9 @@ remaining work.
 Acceptance: identical pinned content is restored on a new CPU-mode volume, no
 CPU-mode GPU performs source downloads, GPU-only mode remains compatible,
 retained outputs verify locally, and exact disposable session resources are
-absent after successful close.
+absent after successful close. CPU-mode validation includes a data center
+without RunPod S3 support and proves that no CPU-mode S3 operation or S3
+credential is required.
 
 ## 15. Verification and cost evidence
 
