@@ -66,7 +66,7 @@ class GpuOption:
 @dataclass(frozen=True)
 class DataCenterResult:
     data_center_id: str
-    s3_endpoint: str
+    s3_endpoint: str | None
     cpu_flavors: tuple[str, ...]
     gpus: tuple[GpuOption, ...]
 
@@ -77,8 +77,9 @@ class RejectedDataCenter:
     reasons: tuple[str, ...]
 
 
-Fetcher = Callable[[str, str], Mapping[str, object]]
+Fetcher = Callable[[str, str | None], Mapping[str, object]]
 GpuCatalogFetcher = Callable[[str], Mapping[str, object]]
+DataCenterFetcher = Callable[[], Sequence[str]]
 DebugWriter = Callable[[str], None]
 
 
@@ -92,9 +93,18 @@ def _positive_integer(value: str) -> int:
     return result
 
 
+def _boolean(value: str) -> bool:
+    normalized = value.casefold()
+    if normalized in {"true", "yes", "1"}:
+        return True
+    if normalized in {"false", "no", "0"}:
+        return False
+    raise argparse.ArgumentTypeError("must be true or false")
+
+
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="List RunPod data centers with Standard volumes, S3, CPU, and available GPUs.",
+        description="List RunPod data centers with Standard volumes, CPU, and available GPUs (S3 required by default).",
     )
     parser.add_argument(
         "--cpu-flavor", action="append", default=[], metavar="NAME",
@@ -118,7 +128,11 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--datacenter", action="append", default=[], metavar="ID",
-        help="limit to an exact S3-capable RunPod data-center ID; repeatable",
+        help="limit to an exact RunPod data-center ID; repeatable",
+    )
+    parser.add_argument(
+        "--s3-required", type=_boolean, default=True, metavar="{true,false}",
+        help="require S3 support for selected sites (default: true)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
@@ -212,6 +226,34 @@ def _fetch_catalog(
         debug=debug,
         opener=opener,
     )
+
+
+def _fetch_data_center_ids(
+    api_key: str,
+    *,
+    debug: DebugWriter | None = None,
+    opener=urlopen,
+) -> tuple[str, ...]:
+    """List all current catalog data-center IDs for non-S3-restricted searches."""
+    query = urlencode({"include": ",".join(CATALOG_INCLUDES)})
+    catalog = _catalog_request(
+        api_key,
+        f"{CATALOG_BASE}?{query}",
+        "data centers",
+        debug=debug,
+        opener=opener,
+    )
+    entries = catalog.get("dataCenters")
+    if not isinstance(entries, list):
+        raise AvailabilityError("RunPod catalog response for data centers did not contain a dataCenters list")
+    identifiers = tuple(
+        item["id"].upper()
+        for item in entries
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]
+    )
+    if not identifiers:
+        raise AvailabilityError("RunPod catalog response for data centers contained no valid IDs")
+    return identifiers
 
 
 def _fetch_gpu_catalog(
@@ -389,8 +431,9 @@ def select_data_centers(
     gpu_catalog_fetcher: GpuCatalogFetcher | None = None,
     regions: Sequence[str] = (),
     data_centers: Sequence[str] = (),
+    s3_required: bool = True,
 ) -> tuple[list[DataCenterResult], list[RejectedDataCenter]]:
-    """Return live, S3-capable data centers that meet the requested filters."""
+    """Return live data centers that meet the requested capability filters."""
     if cheapest_gpus < 1:
         raise ValueError("cheapest_gpus must be positive")
     requested_ids = tuple(item.upper() for item in data_centers) or tuple(S3_ENDPOINTS)
@@ -400,7 +443,7 @@ def select_data_centers(
     for data_center_id in requested_ids:
         reasons = []
         s3_endpoint = S3_ENDPOINTS.get(data_center_id)
-        if s3_endpoint is None:
+        if s3_required and s3_endpoint is None:
             rejected.append(RejectedDataCenter(data_center_id, ("not listed in the authoritative S3 table",)))
             continue
         if not _matches_region(data_center_id, regions):
@@ -456,7 +499,7 @@ def _human_value(
     for result in results:
         lines.extend((
             result.data_center_id,
-            f"  S3 endpoint: {result.s3_endpoint}",
+            f"  S3 endpoint: {result.s3_endpoint or 'unavailable'}",
             f"  CPU flavors: {', '.join(result.cpu_flavors)}",
             "  Cheapest available GPUs:",
         ))
@@ -480,6 +523,7 @@ def run(
     environ: Mapping[str, str] | None = None,
     fetcher: Fetcher | None = None,
     gpu_fetcher: GpuCatalogFetcher | None = None,
+    data_center_fetcher: DataCenterFetcher | None = None,
     stdout=None,
     stderr=None,
 ) -> int:
@@ -500,6 +544,16 @@ def run(
     gpu_catalog_fetcher = gpu_fetcher or (
         lambda gpu_type_id: _fetch_gpu_catalog(api_key, gpu_type_id, debug=debug)
     )
+    requested_data_centers = tuple(arguments.datacenter)
+    if not requested_data_centers and not arguments.s3_required:
+        actual_data_center_fetcher = data_center_fetcher or (
+            lambda: _fetch_data_center_ids(api_key, debug=debug)
+        )
+        try:
+            requested_data_centers = tuple(actual_data_center_fetcher())
+        except AvailabilityError as error:
+            print(error, file=errors)
+            return 1
     results, rejected = select_data_centers(
         actual_fetcher,
         cpu_flavors=cpu_flavors,
@@ -508,7 +562,8 @@ def run(
         price_type=arguments.price_type,
         gpu_catalog_fetcher=gpu_catalog_fetcher,
         regions=tuple(arguments.region),
-        data_centers=tuple(arguments.datacenter),
+        data_centers=requested_data_centers,
+        s3_required=arguments.s3_required,
     )
     checked_at = datetime.now(timezone.utc).isoformat()
     value = _json_value(checked_at, results, rejected) if arguments.json else _human_value(checked_at, results, rejected)

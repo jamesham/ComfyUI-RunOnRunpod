@@ -9,6 +9,7 @@ from coordinator.datacenter_availability import (
     S3_ENDPOINTS,
     USER_AGENT,
     _fetch_catalog,
+    _fetch_data_center_ids,
     _fetch_gpu_catalog,
     run,
     select_data_centers,
@@ -96,6 +97,54 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         self.assertIn("CPU flavor", rejected[0].reasons[0])
         self.assertIn("authoritative S3 table", rejected[1].reasons[0])
 
+    def test_can_select_a_non_s3_data_center_when_s3_is_not_required(self):
+        self.catalogs["US-GA-1"] = {
+            "networkVolumeTypes": [{"id": "STANDARD", "available": True}],
+            "cpuFlavors": [{"id": "cpu3c", "available": True}],
+            "gpuTypes": [{"id": "NVIDIA GeForce RTX 4090", "available": True}],
+        }
+        results, rejected = select_data_centers(
+            self.fetch, cpu_flavors=("cpu3c",), gpu_preferences=(), cheapest_gpus=1,
+            data_centers=("US-GA-1",), gpu_catalog_fetcher=self.fetch_gpu,
+            s3_required=False,
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual([item.data_center_id for item in results], ["US-GA-1"])
+        self.assertIsNone(results[0].s3_endpoint)
+
+    def test_cli_accepts_false_for_s3_required_and_marks_s3_unavailable(self):
+        self.catalogs["US-GA-1"] = {
+            "networkVolumeTypes": [{"id": "STANDARD", "available": True}],
+            "cpuFlavors": [{"id": "cpu3c", "available": True}],
+            "gpuTypes": [{"id": "NVIDIA GeForce RTX 4090", "available": True}],
+        }
+        stdout = io.StringIO()
+        result = run(
+            ["--datacenter", "US-GA-1", "--s3-required", "false"],
+            environ={"RUNPOD_API_KEY": "test"}, fetcher=self.fetch,
+            gpu_fetcher=self.fetch_gpu, stdout=stdout,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("S3 endpoint: unavailable", stdout.getvalue())
+
+    def test_cli_discovers_all_data_centers_when_s3_is_not_required(self):
+        self.catalogs["US-GA-1"] = {
+            "networkVolumeTypes": [{"id": "STANDARD", "available": True}],
+            "cpuFlavors": [{"id": "cpu3c", "available": True}],
+            "gpuTypes": [{"id": "NVIDIA GeForce RTX 4090", "available": True}],
+        }
+        stdout = io.StringIO()
+        discovered = []
+        result = run(
+            ["--s3-required", "false"], environ={"RUNPOD_API_KEY": "test"},
+            fetcher=self.fetch, gpu_fetcher=self.fetch_gpu,
+            data_center_fetcher=lambda: discovered.append(True) or ("US-GA-1",),
+            stdout=stdout,
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(discovered, [True])
+        self.assertIn("US-GA-1", stdout.getvalue())
+
     def test_cli_defaults_cpu_flavor_and_human_output(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -171,6 +220,22 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         self.assertIn("<<< X-Request-ID: request-1", transcript)
         self.assertIn('{"networkVolumeTypes": ["STANDARD"]}', transcript)
         self.assertNotIn("never-print-this", transcript)
+
+    def test_data_center_listing_uses_catalog_endpoint_and_explicit_user_agent(self):
+        captured = []
+
+        def opener(request, *, timeout):
+            captured.append((request, timeout))
+            return FakeCatalogResponse(b'{"dataCenters": [{"id": "US-GA-1"}]}')
+
+        result = _fetch_data_center_ids("never-print-this", opener=opener)
+        self.assertEqual(result, ("US-GA-1",))
+        self.assertEqual(captured[0][1], 20)
+        self.assertEqual(
+            captured[0][0].full_url,
+            "https://api.runpod.io/v2/catalog/datacenters?include=CPU_AVAILABILITY%2CGPU_AVAILABILITY",
+        )
+        self.assertEqual(captured[0][0].get_header("User-agent"), USER_AGENT)
 
     def test_gpu_price_lookup_uses_encoded_gpu_type_and_explicit_user_agent(self):
         captured = []

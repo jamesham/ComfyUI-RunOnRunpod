@@ -1,10 +1,11 @@
 # RunPod data-center availability utility
 
 `python -m coordinator.datacenter_availability` performs a read-only, live
-RunPod catalog check. It identifies S3-capable data centers that also advertise
-a Standard-performance network volume, any available CPU flavor (or a requested
-one), and one or more available GPUs. It performs an additional live GPU-catalog
-lookup for each GPU type so pricing and serverless-pool IDs are current.
+RunPod catalog check. By default it identifies S3-capable data centers that
+also advertise a Standard-performance network volume, any available CPU flavor
+(or a requested one), and one or more available GPUs. It performs an additional
+live GPU-catalog lookup for each GPU type so pricing and serverless-pool IDs are
+current.
 
 The command requires a RunPod API key in `RUNPOD_API_KEY`. It never accepts an
 API key as an argument, persists it, or includes it in command output.
@@ -33,6 +34,13 @@ prices for a particular data center.
 `--cheapest-gpus` defaults to `1`. Repeat `--region` or `--datacenter` to narrow
 the search. `--json` selects machine-readable output; human-readable output is
 the default.
+
+`--s3-required` accepts `true` (the default) or `false`. With `true`, a data
+center must appear in RunPod's S3-compatible API table. With `false`, the
+utility discovers candidates from the live RunPod catalog instead, so S3 is not
+a selection criterion and a selected data center may or may not support it.
+Results without S3 report a null endpoint in JSON and `unavailable` in
+human-readable output.
 
 Pass `--debug-http` to write each catalog request and complete response
 (including response headers and body) to standard error. Request credential
