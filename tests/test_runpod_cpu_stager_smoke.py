@@ -7,7 +7,8 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from integration.runpod_cpu_stager_smoke import _debug_api_call, _profile, _secret_reference, run
+from cpu_stager_client import CpuStagerError
+from integration.runpod_cpu_stager_smoke import _corrupt_signature, _debug_api_call, _profile, _secret_reference, run
 
 
 class RunPodCpuStagerSmokeTests(unittest.TestCase):
@@ -66,6 +67,38 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
              patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False):
             self.assertEqual(run(arguments), 0)
         self.assertIs(adapter.call_args.kwargs["debug"], stage.call_args.kwargs["on_api_call"])
+
+    def test_corrupt_signature_preserves_the_payload_but_changes_the_signature(self):
+        envelope = {"payload": {"operation_id": "smoke-stage"}, "signature": "a" * 64}
+        corrupted = _corrupt_signature(envelope)
+        self.assertEqual(corrupted["payload"], envelope["payload"])
+        self.assertNotEqual(corrupted["signature"], envelope["signature"])
+        self.assertEqual(corrupted["signature"][1:], envelope["signature"][1:])
+
+    def test_corrupt_signature_flag_requires_the_worker_to_refuse_it(self):
+        coordinator = Mock()
+        service = Mock()
+        service.start.return_value = {
+            "session_id": "smoke-test", "state": "preparing",
+            "bindings": {"volume_id": "volume-1", "cpu_endpoint_id": "cpu-1"},
+        }
+        service.end.return_value = {"session_id": "smoke-test", "state": "closed", "bindings": {}}
+        coordinator.authorize_stage.return_value = {
+            "payload": {"operation_id": "smoke-stage"}, "signature": "a" * 64,
+        }
+        output = io.StringIO()
+        with patch("integration.runpod_cpu_stager_smoke.uuid.uuid4", return_value=SimpleNamespace(hex="test")), \
+             patch("integration.runpod_cpu_stager_smoke.SessionCoordinator", return_value=coordinator), \
+             patch("integration.runpod_cpu_stager_smoke.RunPodLifecycleAdapter"), \
+             patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
+             patch("integration.runpod_cpu_stager_smoke.stage_models", side_effect=CpuStagerError("signature is invalid")) as stage, \
+             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(run(self._live_arguments() + ["--corrupt-signature"]), 0)
+        self.assertNotEqual(stage.call_args.args[2]["signature"], "a" * 64)
+        coordinator.record_stage_result.assert_not_called()
+        service.end.assert_called_once_with("smoke-test")
+        self.assertIn("SIGNATURE REJECTED", output.getvalue())
 
     def test_run_records_result_then_cleans_exact_session(self):
         coordinator = Mock()

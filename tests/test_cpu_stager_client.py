@@ -109,6 +109,17 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(CpuStagerError, "download failed"):
                 await stage_models("cpu-endpoint", "api-key", self.envelope)
 
+    async def test_completed_worker_signature_rejection_is_reported(self):
+        session = FakeSession({"id": "job-1"}, [{
+            "status": "COMPLETED",
+            "output": {"status": "failed", "error": "signed stage request signature is invalid"},
+        }])
+        aiohttp = SimpleNamespace(ClientSession=lambda: session)
+        with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
+             patch("cpu_stager_client.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(CpuStagerError, "signature is invalid"):
+                await stage_models("cpu-endpoint", "api-key", self.envelope)
+
     async def test_timeout_stops_polling_before_another_status_request(self):
         session = FakeSession({"id": "job-1"}, [])
         aiohttp = SimpleNamespace(ClientSession=lambda: session)

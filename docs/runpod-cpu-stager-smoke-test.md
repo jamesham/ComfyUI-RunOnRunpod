@@ -95,6 +95,11 @@ tokens, and all endpoint environment-variable values are redacted. The signed
 signature can be inspected. It does not contain the HMAC key, but it may
 contain model-source URLs and should be treated as operationally sensitive.
 
+Add `--corrupt-signature` to submit the same model specification with one
+signature nibble changed. This is a successful smoke-test outcome only when the
+CPU worker explicitly rejects it for a signature error; no model download should
+begin. The harness still deletes the temporary endpoint and volume.
+
 ## Cleanup and failure behavior
 
 Cleanup runs in `finally` after a successfully recorded session, including

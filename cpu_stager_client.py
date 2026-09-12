@@ -87,6 +87,9 @@ async def stage_models(
             if state == "IN_PROGRESS" and isinstance(output, dict) and on_progress:
                 on_progress(output)
             if state == "COMPLETED":
+                if isinstance(output, dict) and output.get("status") == "failed":
+                    message = output.get("error") or "CPU worker rejected the staging request"
+                    raise CpuStagerError(f"CPU staging failed: {message}")
                 try:
                     return validate_stage_result(output, request)
                 except CpuStagingContractError as error:

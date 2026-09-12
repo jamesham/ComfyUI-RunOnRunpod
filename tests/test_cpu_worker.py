@@ -7,6 +7,7 @@ from types import ModuleType
 import unittest
 from unittest.mock import patch
 
+from cpu_staging_contract import sign_stage_request
 
 def _load_handler() -> ModuleType:
     path = Path(__file__).resolve().parents[1] / "worker-cpu" / "handler.py"
@@ -37,3 +38,22 @@ class CpuWorkerHeaderTests(unittest.TestCase):
             self.assertEqual(handler._headers("civitai"), {
                 "User-Agent": "ComfyUI-RunOnRunpod", "Authorization": "Bearer civitai-token",
             })
+
+    def test_handler_refuses_a_corrupted_signature_before_staging(self):
+        handler = _load_handler()
+        handler.SIGNING_KEY = "test-hmac"
+        handler.VOLUME_BINDING = "volume-1"
+        envelope = sign_stage_request({
+            "protocol_version": 1, "operation_id": "prep-1", "volume_binding": "volume-1",
+            "models": [{
+                "target_path": "models/checkpoints/base.safetensors", "url": "https://example.test/base",
+                "expected_sha256": "a" * 64, "expected_size": 1, "auth": "none",
+            }],
+        }, "test-hmac")
+        replacement = "0" if envelope["signature"][0] != "0" else "1"
+        envelope["signature"] = replacement + envelope["signature"][1:]
+
+        result = handler.handler({"input": {"signed_request": envelope}})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("signature is invalid", result["error"])

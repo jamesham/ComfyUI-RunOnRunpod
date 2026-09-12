@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from typing import Mapping, Sequence
 
 from coordinator import ManagedProfile, RunPodLifecycleAdapter, SessionCoordinator, SessionLifecycleService
-from cpu_stager_client import stage_models
+from cpu_stager_client import CpuStagerError, stage_models
 from resource_plan import ModelIdentity, compile_model_resource_plan
 
 
@@ -71,6 +71,17 @@ def _debug_api_call(method: str, path: str, request: object, status: int | None,
     }, sort_keys=True), file=sys.stderr, flush=True)
 
 
+def _corrupt_signature(envelope: object) -> dict[str, object]:
+    """Return the same signed envelope with one signature nibble changed."""
+    if not isinstance(envelope, Mapping):
+        raise ValueError("coordinator did not return a signed staging envelope")
+    signature = envelope.get("signature")
+    if not isinstance(signature, str) or not signature:
+        raise ValueError("coordinator did not return a staging signature")
+    replacement = "0" if signature[0] != "0" else "1"
+    return {**dict(envelope), "signature": replacement + signature[1:]}
+
+
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create, exercise, inspect, and delete a temporary RunPod CPU stager session.",
@@ -78,6 +89,10 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="required acknowledgement of billable provider operations")
     parser.add_argument("--pause-after-create", action="store_true", help="wait for Enter after creation before staging and cleanup")
     parser.add_argument("--debug", action="store_true", help="log redacted RunPod API requests and results to stderr")
+    parser.add_argument(
+        "--corrupt-signature", action="store_true",
+        help="submit a deliberately invalid signature and require CPU-worker refusal",
+    )
     parser.add_argument("--api-key-env", default="RUNPOD_API_KEY", help="environment variable holding the RunPod API key")
     parser.add_argument("--signing-key-env", default="RUNONRUNPOD_CPU_STAGING_SIGNING_KEY", help="environment variable holding the CPU HMAC value")
     parser.add_argument("--data-center", required=True, help="RunPod data-center ID for volume and CPU endpoint")
@@ -192,13 +207,23 @@ def run(argv: Sequence[str] | None = None) -> int:
             input("Inspect RunPod now. Press Enter to stage one download and clean up these resources. ")
 
         envelope = coordinator.authorize_stage(session_id, "smoke-stage", [download], signing_key)
+        if arguments.corrupt_signature:
+            envelope = _corrupt_signature(envelope)
         endpoint_id = session["bindings"]["cpu_endpoint_id"]
-        result = asyncio.run(stage_models(
-            endpoint_id, api_key, envelope, timeout_seconds=arguments.stage_timeout_seconds,
-            on_api_call=debug_call,
-        ))
-        coordinator.record_stage_result(session_id, "smoke-stage", result)
-        print("STAGED", {"target_path": download["dest_path"], "sha256": arguments.sha256, "size": arguments.size}, flush=True)
+        try:
+            result = asyncio.run(stage_models(
+                endpoint_id, api_key, envelope, timeout_seconds=arguments.stage_timeout_seconds,
+                on_api_call=debug_call,
+            ))
+        except CpuStagerError as error:
+            if not arguments.corrupt_signature or "signature" not in str(error).casefold():
+                raise
+            print("SIGNATURE REJECTED", {"reason": str(error)}, flush=True)
+        else:
+            if arguments.corrupt_signature:
+                raise RuntimeError("CPU stager accepted a deliberately corrupted signature")
+            coordinator.record_stage_result(session_id, "smoke-stage", result)
+            print("STAGED", {"target_path": download["dest_path"], "sha256": arguments.sha256, "size": arguments.size}, flush=True)
         outcome = 0
     except Exception as error:
         print(f"SMOKE TEST FAILED: {error}", file=sys.stderr, flush=True)
