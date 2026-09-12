@@ -22,6 +22,9 @@ const JOB_STATE = {
 let jobs = [];
 let jobListEl = null;
 let workerInfoEl = null;
+let managedSessionInfoEl = null;
+let managedSessionStartBtn = null;
+let managedSessionEndBtn = null;
 
 function renderWorkerInfo(info) {
     if (!workerInfoEl) return;
@@ -307,6 +310,7 @@ function getSettings() {
         uploadMissingModels: app.extensionManager.setting.get("Run on Runpod.Job.uploadMissingModels") ?? true,
         downloadModelsFromTheSource: app.extensionManager.setting.get("Run on Runpod.Job.downloadModelsFromTheSource") ?? false,
         stagingMode: app.extensionManager.setting.get("Run on Runpod.Job.stagingMode") || "gpu",
+        managedSessionId: app.extensionManager.setting.get("Run on Runpod.Serverless.managedSessionId") || "",
         civitaiApiKey: app.extensionManager.setting.get("Run on Runpod.Keys.civitaiApiKey") || "",
         hfToken: app.extensionManager.setting.get("Run on Runpod.Keys.hfToken") || "",
     };
@@ -533,10 +537,14 @@ function renderJobList() {
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
     if (!s.endpointId) missing.push("Endpoint ID");
-    if (!s.s3AccessKey) missing.push("S3 Access Key");
-    if (!s.s3SecretKey) missing.push("S3 Secret Key");
-    if (!s.endpointUrl) missing.push("Endpoint URL");
-    if (!s.bucketName) missing.push("Bucket Name");
+    if (s.stagingMode === "cpu") {
+        if (!s.managedSessionId) missing.push("Active Managed Session");
+    } else {
+        if (!s.s3AccessKey) missing.push("S3 Access Key");
+        if (!s.s3SecretKey) missing.push("S3 Secret Key");
+        if (!s.endpointUrl) missing.push("Endpoint URL");
+        if (!s.bucketName) missing.push("Bucket Name");
+    }
     if (missing.length > 0) {
         jobListEl.innerHTML = `<div class="runpod-warning">Configure in Settings &gt; Run on Runpod:<br>${missing.join(", ")}</div>`;
     }
@@ -561,10 +569,14 @@ async function submitJob() {
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
     if (!s.endpointId) missing.push("Endpoint ID");
-    if (!s.s3AccessKey) missing.push("S3 Access Key");
-    if (!s.s3SecretKey) missing.push("S3 Secret Key");
-    if (!s.endpointUrl) missing.push("Endpoint URL");
-    if (!s.bucketName) missing.push("Bucket Name");
+    if (s.stagingMode === "cpu") {
+        if (!s.managedSessionId) missing.push("Active Managed Session");
+    } else {
+        if (!s.s3AccessKey) missing.push("S3 Access Key");
+        if (!s.s3SecretKey) missing.push("S3 Secret Key");
+        if (!s.endpointUrl) missing.push("Endpoint URL");
+        if (!s.bucketName) missing.push("Bucket Name");
+    }
     if (missing.length > 0) {
         console.error("[RunOnRunpod] Missing settings:", missing.join(", "));
         alert(`Missing settings: ${missing.join(", ")}`);
@@ -651,6 +663,160 @@ async function submitJob() {
         job.state = JOB_STATE.ERROR;
         job.message = String(err);
         renderJobList();
+    }
+}
+
+function _setManagedSessionId(sessionId) {
+    app.extensionManager.setting.set("Run on Runpod.Serverless.managedSessionId", sessionId || "");
+}
+
+function _renderManagedSession(data = null, error = "") {
+    if (!managedSessionInfoEl) return;
+    const settings = getSettings();
+    const cpuMode = settings.stagingMode === "cpu";
+    // Keep cleanup reachable even if the user switches staging mode after a
+    // partial session. The action handlers still validate creation mode.
+    managedSessionStartBtn.disabled = false;
+    managedSessionEndBtn.disabled = !settings.managedSessionId;
+
+    if (!cpuMode) {
+        managedSessionInfoEl.textContent = "Managed session: CPU staging is not selected";
+        return;
+    }
+    if (error) {
+        managedSessionInfoEl.textContent = `Managed session: ${error}`;
+        return;
+    }
+    if (!data) {
+        managedSessionInfoEl.textContent = settings.managedSessionId
+            ? `Managed session: ${settings.managedSessionId}`
+            : "Managed session: not started";
+        return;
+    }
+    const parts = [`Managed session: ${data.state || "unknown"}`];
+    if (data.volumeId) parts.push(`volume ${data.volumeId}`);
+    if (data.cpuEndpointId) parts.push(`CPU ${data.cpuEndpointId}`);
+    managedSessionInfoEl.textContent = parts.join(" · ");
+    managedSessionInfoEl.title = [
+        data.managedSessionId,
+        data.profileId ? `Profile: ${data.profileId}` : "",
+        data.recipeId ? `Recipe: ${data.recipeId}` : "",
+    ].filter(Boolean).join("\n");
+}
+
+async function refreshManagedSessionStatus() {
+    const settings = getSettings();
+    _renderManagedSession();
+    if (settings.stagingMode !== "cpu") return;
+
+    try {
+        const configResponse = await api.fetchApi("/RunOnRunpod/managed-session/config");
+        const config = await configResponse.json();
+        if (!config.configured) {
+            _renderManagedSession(null, config.error || "server lifecycle is not configured");
+            return;
+        }
+        if (!settings.managedSessionId) {
+            managedSessionInfoEl.textContent =
+                `Managed session: not started · ${config.dataCenter} · ${config.volumeSizeGb} GB`;
+            managedSessionInfoEl.title = `Profile: ${config.profileId}\nRecipe: ${config.recipeId}`;
+            return;
+        }
+        const response = await api.fetchApi("/RunOnRunpod/managed-session/status", {
+            method: "POST",
+            body: JSON.stringify({ session_id: settings.managedSessionId }),
+        });
+        const data = await response.json();
+        if (data.error) {
+            _renderManagedSession(null, data.error);
+        } else {
+            _renderManagedSession(data);
+        }
+    } catch (err) {
+        console.error("[RunOnRunpod] managed session status error:", err);
+        _renderManagedSession(null, String(err));
+    }
+}
+
+async function startManagedSession(btn) {
+    const settings = getSettings();
+    if (settings.stagingMode !== "cpu") {
+        alert("Select CPU managed staging before starting a managed session.");
+        return;
+    }
+    if (!settings.apiKey) {
+        alert("A RunPod API Key is required to create managed resources.");
+        return;
+    }
+
+    const sessionId = settings.managedSessionId ||
+        `session-${crypto.randomUUID().replaceAll("-", "")}`;
+    // Persist before the provider call. If the response is lost after a
+    // successful create, the same ID can reconcile rather than orphaning a
+    // second volume and endpoint on retry.
+    _setManagedSessionId(sessionId);
+    btn.disabled = true;
+    managedSessionInfoEl.textContent = "Managed session: provisioning...";
+    try {
+        const response = await api.fetchApi("/RunOnRunpod/managed-session/start", {
+            method: "POST",
+            body: JSON.stringify({ settings: getSettings(), session_id: sessionId }),
+        });
+        const data = await response.json();
+        if (data.error) {
+            _renderManagedSession(null, data.error);
+        } else {
+            _setManagedSessionId(data.managedSessionId);
+            _renderManagedSession(data);
+            renderJobList();
+        }
+    } catch (err) {
+        console.error("[RunOnRunpod] managed session start error:", err);
+        _renderManagedSession(null, `start may be incomplete; retry to reconcile (${err})`);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function endManagedSession(btn) {
+    const settings = getSettings();
+    if (!settings.managedSessionId) return;
+    if (jobs.some(job => ACTIVE_STATES.includes(job.state))) {
+        alert("Wait for or cancel active jobs before ending this managed session.");
+        return;
+    }
+    const confirmed = confirm(
+        "End this creative session?\n\n" +
+        "The managed CPU endpoint and temporary network volume will be deleted. " +
+        "Confirm only after all outputs you want to retain are present locally. " +
+        "Deletion cannot be undone."
+    );
+    if (!confirmed) return;
+
+    btn.disabled = true;
+    managedSessionInfoEl.textContent = "Managed session: closing...";
+    try {
+        const response = await api.fetchApi("/RunOnRunpod/managed-session/end", {
+            method: "POST",
+            body: JSON.stringify({
+                settings,
+                session_id: settings.managedSessionId,
+                outputs_retrieved: true,
+            }),
+        });
+        const data = await response.json();
+        if (data.error) {
+            _renderManagedSession(null, data.error);
+        } else {
+            _setManagedSessionId("");
+            _renderManagedSession(data);
+            renderJobList();
+        }
+    } catch (err) {
+        console.error("[RunOnRunpod] managed session end error:", err);
+        _renderManagedSession(null, `cleanup may be incomplete; retry (${err})`);
+    } finally {
+        btn.disabled = false;
     }
 }
 
@@ -1030,6 +1196,13 @@ const STYLES = `
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    .runpod-session-info {
+        padding: 6px 12px;
+        font-size: 11px;
+        color: var(--p-text-muted-color, #888);
+        border-bottom: 1px solid var(--p-content-border-color, #333);
+        overflow-wrap: anywhere;
+    }
     .runpod-jobs {
         flex: 1;
         overflow-y: auto;
@@ -1236,6 +1409,10 @@ app.registerExtension({
                 { text: "CPU managed staging", value: "cpu" },
             ],
             tooltip: "GPU only keeps the existing worker download-then-infer flow. CPU managed staging requires a separately configured coordinator and CPU staging endpoint; it never falls back to GPU downloads.",
+            onChange: () => {
+                renderJobList();
+                refreshManagedSessionStatus();
+            },
         },
         {
             id: "Run on Runpod.Job.downloadModelsFromTheSource",
@@ -1341,6 +1518,13 @@ app.registerExtension({
             name: "Endpoint ID",
             type: "text",
             defaultValue: "",
+        },
+        {
+            id: "Run on Runpod.Serverless.managedSessionId",
+            name: "Managed Session ID",
+            type: "text",
+            defaultValue: "",
+            tooltip: "Managed automatically by the sidebar. Retain this ID after an interrupted create or cleanup so Retry can reconcile the same RunPod resources.",
         },
     ],
 
@@ -1603,6 +1787,24 @@ app.registerExtension({
                 row2.appendChild(latencyBtn);
                 toolbar.appendChild(row2);
 
+                managedSessionStartBtn = document.createElement("button");
+                managedSessionStartBtn.className = "runpod-btn clean";
+                managedSessionStartBtn.textContent = "Start / Recover Session";
+                managedSessionStartBtn.title = "Create or reconcile the CPU staging endpoint and temporary network volume";
+                managedSessionStartBtn.addEventListener("click", () => startManagedSession(managedSessionStartBtn));
+
+                managedSessionEndBtn = document.createElement("button");
+                managedSessionEndBtn.className = "runpod-btn clean danger";
+                managedSessionEndBtn.textContent = "End Session";
+                managedSessionEndBtn.title = "Delete the managed CPU endpoint and temporary network volume";
+                managedSessionEndBtn.addEventListener("click", () => endManagedSession(managedSessionEndBtn));
+
+                const sessionRow = document.createElement("div");
+                sessionRow.className = "runpod-toolbar-row";
+                sessionRow.appendChild(managedSessionStartBtn);
+                sessionRow.appendChild(managedSessionEndBtn);
+                toolbar.appendChild(sessionRow);
+
                 // Worker info row — populated by the version action on
                 // first successful submit (cached server-side and pushed
                 // via the worker_info WebSocket event).
@@ -1610,18 +1812,24 @@ app.registerExtension({
                 workerInfoEl.className = "runpod-worker-info";
                 workerInfoEl.textContent = "Worker info appears after your first submit.";
 
+                managedSessionInfoEl = document.createElement("div");
+                managedSessionInfoEl.className = "runpod-session-info";
+                managedSessionInfoEl.textContent = "Managed session: checking configuration...";
+
                 // Job list (scrollable)
                 jobListEl = document.createElement("div");
                 jobListEl.className = "runpod-jobs";
 
                 container.appendChild(title);
                 container.appendChild(toolbar);
+                container.appendChild(managedSessionInfoEl);
                 container.appendChild(workerInfoEl);
                 container.appendChild(jobListEl);
                 el.appendChild(container);
 
                 renderJobList();
                 loadJobs();
+                refreshManagedSessionStatus();
             },
         });
 

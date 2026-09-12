@@ -8,6 +8,7 @@ explicitly enables it.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -132,6 +133,23 @@ class SessionCoordinator:
         record.parent.mkdir(parents=True, exist_ok=True)
         return open(self._lock_path(record), "a+b")
 
+    @contextmanager
+    def lifecycle_lock(self, session_id: str):
+        """Serialize the complete intent/provider-call/receipt sequence.
+
+        Atomic record writes prevent torn state, but only this wider lock stops
+        two processes from both acting on the same unfulfilled create intent.
+        """
+        session_id = _id(session_id, "session ID")
+        lock_path = self.root / "sessions" / session_id / "lifecycle.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def save_recipe(
         self,
         recipe_id: str,
@@ -216,6 +234,10 @@ class SessionCoordinator:
 
     def get_profile(self, profile_id: str) -> dict[str, object]:
         return _read_json(self._profile_path(_id(profile_id, "profile ID")))
+
+    def get_recipe(self, recipe_id: str) -> dict[str, object]:
+        """Read a durable recipe without exposing its filesystem location."""
+        return _read_json(self._recipe_path(_id(recipe_id, "recipe ID")))
 
     def create_provisioning_session(
         self,
@@ -434,3 +456,7 @@ class SessionCoordinator:
 
     def get_session(self, session_id: str) -> dict[str, object]:
         return _read_json(self._session_path(_id(session_id, "session ID")))
+
+    def session_exists(self, session_id: str) -> bool:
+        """Check for a session record after applying the normal ID validation."""
+        return self._session_path(_id(session_id, "session ID")).is_file()

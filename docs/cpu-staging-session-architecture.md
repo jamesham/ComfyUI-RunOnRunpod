@@ -100,10 +100,13 @@ credential. CPU preparation is completed before GPU health/version/node checks;
 the configured GPU endpoint is also checked through the RunPod API for the same
 session-volume binding before inference;
 GPU-only mode retains its existing S3 and GPU preparation order. The browser
-CPU path currently fails closed unless an existing managed session supplies the
-CPU endpoint, volume binding, and server-side signing key; user-facing managed
-session start/end and fresh-session recipe restoration remain the next lifecycle
-integration step.
+now has guarded start/status/recover/end routes and additive sidebar controls.
+They use the plugin's RunPod API key only for the current request while the
+profile, recipe, signing key, state root, images, secret mappings, region, and
+resource sizes remain server-owned. The browser-generated session ID is saved
+before creation so a lost response can reconcile the same durable resource
+intent. Managed GPU endpoint creation/attachment and fresh-session recipe
+restoration remain the next lifecycle integration steps.
 
 ## 1. Objective and scope
 
@@ -637,13 +640,13 @@ their main-branch workflow without creating a CPU helper. Do not redesign the
 sidebar or remove controls. Byte-for-byte preservation is not a goal if it
 would leave stale IDs or block backend-managed configuration.
 
-The current branch contains a guarded companion CLI for session
-start/end/recover, but its environment-supplied `RUNPOD_API_KEY` is an interim
-scaffold and is not the target credential model. Replace it with a local backend
-handoff of the user's request-scoped plugin API key before enabling lifecycle
-creation from the UI. Automatic CPU-mode creation on Run is enabled only by an
-explicitly configured managed profile and user consent. An end-session UI can
-be a later additive feature.
+The guarded companion CLI remains available for operator recovery and continues
+to use an environment-supplied `RUNPOD_API_KEY`. Browser lifecycle actions use
+the user's request-scoped plugin API key instead; the key is placed only in the
+short-lived provider adapter and is never written to coordinator state. CPU-mode
+creation requires an explicitly configured managed profile and recipe plus the
+user's Start / Recover action. End Session is an explicit destructive action
+with an output-retention acknowledgement.
 
 In CPU-managed mode, the selected profile is authoritative for resources. All
 submit, verify, cancel, recover, and clean routes resolve the same backend
@@ -837,12 +840,12 @@ materialization, volume readiness receipts, and a signed CPU-stage contract
 with a thin CPU image are implemented. Durable recipe/session records, local
 request authorization, a fakeable lifecycle core, and a guarded, hermetically
 tested RunPod REST lifecycle adapter are implemented. An operator-only,
-environment-gated CLI now wires that adapter without exposing it to browser
-requests; replacing its environment API key with the user-plugin credential
-handoff remains outstanding. The UI/backend staging-mode contract is
-implemented with GPU compatibility as its default. The explicit upload-install
-contract, durable output-retrieval gate, secret injection, and deployed CPU
-endpoint are outstanding.
+environment-gated CLI and guarded browser routes now wire that adapter. Browser
+mutations use a request-scoped plugin API key while operator policy remains in
+server-owned configuration. The UI/backend staging-mode contract is implemented
+with GPU compatibility as its default. Managed GPU endpoint provisioning,
+durable upload/output ledgers, automatic recipe capture/restoration, and a
+deployed CPU endpoint remain outstanding.
 
 Acceptance: hermetic tests prove that CPU mode makes no GPU `/run` request with
 unresolved, staging, failed, or uninstalled requirements, while GPU-only mode
@@ -880,6 +883,12 @@ its existing S3-backed behavior.
 - Replace the interim CLI environment API key with a request-scoped user-plugin
   credential handoff and existing-settings synchronization.
 - Reconstruct fresh resources from recipes without manual resource-ID edits.
+
+Progress: guarded browser start/status/recover/end operations now create and
+delete the recorded volume and CPU endpoint, synchronize the opaque session ID,
+retain retryable state after partial failures, and hold a cross-process session
+lock across each intent/provider-call/receipt sequence. GPU endpoint lifecycle
+and automatic recipe capture/restoration are not yet connected.
 
 Acceptance: tests cover uncertain creates, crashes between remote writes and
 local recording, stale coordinators, partial cleanup, and fresh session IDs.

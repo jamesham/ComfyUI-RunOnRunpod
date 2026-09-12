@@ -38,7 +38,15 @@ from .cpu_staging_contract import (
     stage_request_from_downloads,
     unsigned_stage_payload,
 )
-from .coordinator import CoordinatorError, SessionCoordinator
+from .coordinator import (
+    CoordinatorError,
+    LifecycleError,
+    ManagedSessionConfigError,
+    SessionCoordinator,
+    lifecycle_from_request,
+    managed_configuration_from_environment,
+    managed_recipe_from_environment,
+)
 
 _PREFIX = "[RunOnRunpod]"
 
@@ -68,6 +76,7 @@ PROTOCOL_VERSION = 2
 STAGING_MODE_GPU = "gpu"
 STAGING_MODE_CPU = "cpu"
 _STAGING_MODES = {STAGING_MODE_GPU, STAGING_MODE_CPU}
+MANAGED_SIGNING_KEY_ENV = "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY"
 
 
 # In-memory state for active jobs: {job_id: asyncio.Task}
@@ -90,6 +99,12 @@ _cancelled_preps: set[str] = set()
 # should keep the card. Otherwise the prep is dead (e.g., the ComfyUI
 # process restarted) and the card can be dropped.
 _active_preps: set[str] = set()
+
+# Managed-session ownership for in-process preparation and polling tasks. These
+# maps are safety barriers for the UI end-session route; durable remote-job
+# reconciliation remains a later lifecycle milestone.
+_active_prep_sessions: dict[str, str] = {}
+_active_job_sessions: dict[str, str] = {}
 
 
 def _send_event(event: str, data: dict = {}):
@@ -371,14 +386,19 @@ async def cancel_prepare(request):
 async def submit_job(request):
     data = await request.json()
     prep_id = data.get("prep_id", "")
+    settings = data.get("settings", {})
+    managed_session_id = settings.get("managedSessionId") if isinstance(settings, dict) else None
     if prep_id:
         _active_preps.add(prep_id)
+        if isinstance(managed_session_id, str) and managed_session_id:
+            _active_prep_sessions[prep_id] = managed_session_id
     try:
         return await _do_submit(data)
     finally:
         # Always discard so a cancelled prep doesn't leak its flag into
         # a future submit that happens to pick the same prep_id.
         _active_preps.discard(prep_id)
+        _active_prep_sessions.pop(prep_id, None)
         _cancelled_preps.discard(prep_id)
 
 
@@ -399,6 +419,171 @@ class _SubmitError(Exception):
 def _raise_if_cancelled(prep_id: str, stage: str) -> None:
     if prep_id in _cancelled_preps:
         raise _SubmitError("Cancelled", 499, log=f"Submit cancelled during {stage}")
+
+
+def _managed_session_summary(session: dict[str, object]) -> dict[str, object]:
+    """Return the frontend lifecycle view without operations or secret policy."""
+    bindings = session.get("bindings")
+    if not isinstance(bindings, dict):
+        bindings = {}
+    return {
+        "managedSessionId": session.get("session_id"),
+        "state": session.get("state"),
+        "profileId": session.get("profile_id"),
+        "recipeId": session.get("recipe_id"),
+        "volumeId": bindings.get("volume_id"),
+        "volumeBinding": bindings.get("volume_binding"),
+        "cpuEndpointId": bindings.get("cpu_endpoint_id"),
+        "gpuEndpointId": bindings.get("gpu_endpoint_id"),
+    }
+
+
+def _assert_configured_session(
+    session: dict[str, object], profile_id: str, recipe_id: str,
+) -> None:
+    """Prevent one configured UI profile from mutating another session."""
+    if session.get("profile_id") != profile_id or session.get("recipe_id") != recipe_id:
+        raise ManagedSessionConfigError(
+            "managed session does not belong to the configured profile and recipe"
+        )
+
+
+def _managed_lifecycle_for_settings(
+    settings: dict,
+    *,
+    require_signing_key: bool,
+):
+    api_key = settings.get("apiKey") if isinstance(settings, dict) else None
+    service, profile = lifecycle_from_request(api_key, os.environ)
+    recipe_id = managed_recipe_from_environment(service.coordinator, os.environ)
+    if require_signing_key and not os.environ.get(MANAGED_SIGNING_KEY_ENV):
+        raise ManagedSessionConfigError(
+            f"{MANAGED_SIGNING_KEY_ENV} is required for managed CPU staging"
+        )
+    return service, profile, recipe_id
+
+
+def _managed_session_is_active(session_id: str) -> bool:
+    return (
+        session_id in _active_prep_sessions.values()
+        or session_id in _active_job_sessions.values()
+    )
+
+
+@routes.get("/RunOnRunpod/managed-session/config")
+async def managed_session_config(_request):
+    """Expose only non-secret, operator-owned lifecycle configuration."""
+    try:
+        _coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
+        if not os.environ.get(MANAGED_SIGNING_KEY_ENV):
+            raise ManagedSessionConfigError(
+                f"{MANAGED_SIGNING_KEY_ENV} is required for managed CPU staging"
+            )
+    except (CoordinatorError, LifecycleError) as error:
+        return web.json_response({"configured": False, "error": str(error)})
+    return web.json_response({
+        "configured": True,
+        "profileId": profile.profile_id,
+        "recipeId": recipe_id,
+        "dataCenter": profile.data_center,
+        "volumeSizeGb": profile.volume_size_gb,
+    })
+
+
+@routes.post("/RunOnRunpod/managed-session/start")
+async def start_managed_session(request):
+    """Create or safely resume the browser-generated managed session ID."""
+    data = await request.json()
+    settings = data.get("settings", {})
+    session_id = data.get("session_id")
+    try:
+        if _staging_mode(settings) != STAGING_MODE_CPU:
+            raise ManagedSessionConfigError("managed sessions require CPU staging mode")
+        if not isinstance(session_id, str) or not session_id:
+            raise ManagedSessionConfigError("managed session start requires a session ID")
+        service, profile, recipe_id = _managed_lifecycle_for_settings(
+            settings, require_signing_key=True,
+        )
+        if service.coordinator.session_exists(session_id):
+            existing = service.coordinator.get_session(session_id)
+            _assert_configured_session(existing, profile.profile_id, recipe_id)
+            if existing.get("state") == "closed":
+                raise ManagedSessionConfigError("managed session is already closed; start a new session")
+            session = await asyncio.to_thread(service.recover, session_id, profile)
+        else:
+            session = await asyncio.to_thread(
+                service.start, recipe_id, profile, session_id=session_id,
+            )
+    except (_SubmitError, CoordinatorError, LifecycleError) as error:
+        print(_PREFIX, f"Managed session start failed: {error}")
+        return web.json_response({"error": str(error)}, status=400)
+    return web.json_response(_managed_session_summary(session))
+
+
+@routes.post("/RunOnRunpod/managed-session/status")
+async def managed_session_status(request):
+    """Read the configured session's durable local state without provider I/O."""
+    data = await request.json()
+    session_id = data.get("session_id")
+    try:
+        if not isinstance(session_id, str) or not session_id:
+            raise ManagedSessionConfigError("managed session status requires a session ID")
+        coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
+        session = coordinator.get_session(session_id)
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+    except (CoordinatorError, LifecycleError) as error:
+        return web.json_response({"error": str(error)}, status=404)
+    return web.json_response(_managed_session_summary(session))
+
+
+@routes.post("/RunOnRunpod/managed-session/recover")
+async def recover_managed_session(request):
+    """Reconcile a recorded volume and CPU endpoint using the user's API key."""
+    data = await request.json()
+    settings = data.get("settings", {})
+    session_id = data.get("session_id")
+    try:
+        if not isinstance(session_id, str) or not session_id:
+            raise ManagedSessionConfigError("managed session recovery requires a session ID")
+        service, profile, recipe_id = _managed_lifecycle_for_settings(
+            settings, require_signing_key=True,
+        )
+        session = service.coordinator.get_session(session_id)
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+        session = await asyncio.to_thread(service.recover, session_id, profile)
+    except (CoordinatorError, LifecycleError) as error:
+        print(_PREFIX, f"Managed session recovery failed: {error}")
+        return web.json_response({"error": str(error)}, status=400)
+    return web.json_response(_managed_session_summary(session))
+
+
+@routes.post("/RunOnRunpod/managed-session/end")
+async def end_managed_session(request):
+    """Delete exact session-owned resources after explicit retention consent."""
+    data = await request.json()
+    settings = data.get("settings", {})
+    session_id = data.get("session_id")
+    try:
+        if not isinstance(session_id, str) or not session_id:
+            raise ManagedSessionConfigError("managed session end requires a session ID")
+        if data.get("outputs_retrieved") is not True:
+            raise ManagedSessionConfigError(
+                "ending a managed session requires output-retrieval acknowledgement"
+            )
+        if _managed_session_is_active(session_id):
+            raise ManagedSessionConfigError(
+                "managed session still has an active preparation or workflow job"
+            )
+        service, profile, recipe_id = _managed_lifecycle_for_settings(
+            settings, require_signing_key=False,
+        )
+        session = service.coordinator.get_session(session_id)
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+        session = await asyncio.to_thread(service.end, session_id)
+    except (CoordinatorError, LifecycleError) as error:
+        print(_PREFIX, f"Managed session end failed: {error}")
+        return web.json_response({"error": str(error)}, status=400)
+    return web.json_response(_managed_session_summary(session))
 
 
 def _validate_settings(settings: dict, staging_mode: str | None = None) -> None:
@@ -1308,6 +1493,9 @@ async def _submit_workflow_to_runpod(
 
     task = asyncio.create_task(_poll_and_finish(job_id, settings, input_files))
     _active_tasks[job_id] = task
+    managed_session_id = settings.get("managedSessionId")
+    if isinstance(managed_session_id, str) and managed_session_id:
+        _active_job_sessions[job_id] = managed_session_id
 
     return web.json_response({
         "job_id": job_id,
@@ -1448,6 +1636,7 @@ async def _poll_and_finish(job_id: str, settings: dict, input_files: dict):
         print(_PREFIX, f"Job {job_id}: polling cancelled")
     finally:
         _active_tasks.pop(job_id, None)
+        _active_job_sessions.pop(job_id, None)
 
 
 def _completed_output_files(result: dict) -> list[str]:
@@ -1780,6 +1969,9 @@ async def recover_jobs(request):
                 if not already_polling:
                     task = asyncio.create_task(_poll_and_finish(job_id, settings, {}))
                     _active_tasks[job_id] = task
+                    managed_session_id = settings.get("managedSessionId")
+                    if isinstance(managed_session_id, str) and managed_session_id:
+                        _active_job_sessions[job_id] = managed_session_id
                     print(_PREFIX, f"recover-jobs: re-attached polling for {job_id}")
             elif status == "FAILED":
                 entry["state"] = "failed"

@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
 import unittest
 
 from coordinator import CoordinatorError, SessionCoordinator
@@ -96,6 +97,36 @@ class SessionCoordinatorTests(unittest.TestCase):
         self.assertEqual(recipe["models"][0]["source"], {
             "kind": "local", "reference": "private-models/base.safetensors",
         })
+
+    def test_lifecycle_lock_serializes_the_whole_remote_operation_window(self):
+        first_acquired = threading.Event()
+        release_first = threading.Event()
+        second_attempting = threading.Event()
+        second_acquired = threading.Event()
+
+        def first():
+            with self.coordinator.lifecycle_lock("session-1"):
+                first_acquired.set()
+                release_first.wait(2)
+
+        def second():
+            second_attempting.set()
+            with self.coordinator.lifecycle_lock("session-1"):
+                second_acquired.set()
+
+        first_thread = threading.Thread(target=first)
+        second_thread = threading.Thread(target=second)
+        first_thread.start()
+        self.assertTrue(first_acquired.wait(1))
+        second_thread.start()
+        self.assertTrue(second_attempting.wait(1))
+        self.assertFalse(second_acquired.wait(0.05))
+        release_first.set()
+        first_thread.join(2)
+        second_thread.join(2)
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertTrue(second_acquired.is_set())
 
 
 if __name__ == "__main__":

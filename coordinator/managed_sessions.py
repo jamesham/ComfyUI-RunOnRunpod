@@ -24,6 +24,7 @@ ENABLE_VALUE = "enabled"
 ROOT_ENV = "RUNONRUNPOD_COORDINATOR_ROOT"
 API_KEY_ENV = "RUNPOD_API_KEY"
 PROFILE_ENV = "RUNONRUNPOD_MANAGED_PROFILE_PATH"
+RECIPE_ENV = "RUNONRUNPOD_MANAGED_RECIPE_ID"
 
 
 class ManagedSessionConfigError(LifecycleError):
@@ -59,21 +60,7 @@ def profile_from_environment(environ: Mapping[str, str] | None = None) -> Manage
         raise ManagedSessionConfigError(f"managed profile is invalid: {error}") from None
 
 
-def lifecycle_from_environment(
-    environ: Mapping[str, str] | None = None,
-    *,
-    transport: Transport | None = None,
-) -> tuple[SessionLifecycleService, ManagedProfile]:
-    """Build the sole mutating lifecycle path after explicit operator opt-in."""
-    values = _environment(environ)
-    if values.get(ENABLE_ENV) != ENABLE_VALUE:
-        raise ManagedSessionConfigError(
-            f"set {ENABLE_ENV}={ENABLE_VALUE} to authorize managed lifecycle mutations"
-        )
-    api_key = values.get(API_KEY_ENV)
-    if not isinstance(api_key, str) or not api_key:
-        raise ManagedSessionConfigError(f"{API_KEY_ENV} is required for managed lifecycle mutations")
-    profile = profile_from_environment(values)
+def _validate_v2_cpu_profile(profile: ManagedProfile) -> None:
     if not profile.cpu_template_id:
         raise ManagedSessionConfigError("managed profile CPU configuration requires template_id")
     if not profile.cpu_flavor_ids or profile.cpu_vcpu_count is None:
@@ -84,9 +71,76 @@ def lifecycle_from_environment(
         raise ManagedSessionConfigError(
             "managed profile CPU vcpu_count must be a power of two and at least 2 for RunPod REST v2"
         )
+
+
+def managed_recipe_from_environment(
+    coordinator: SessionCoordinator,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Return the operator-selected recipe after proving it exists locally."""
+    recipe_id = _environment(environ).get(RECIPE_ENV)
+    if not isinstance(recipe_id, str) or not recipe_id:
+        raise ManagedSessionConfigError(f"{RECIPE_ENV} must name an existing managed recipe")
+    try:
+        coordinator.get_recipe(recipe_id)
+    except CoordinatorError as error:
+        raise ManagedSessionConfigError(f"configured managed recipe is unavailable: {error}") from None
+    return recipe_id
+
+
+def managed_configuration_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[SessionCoordinator, ManagedProfile, str]:
+    """Load the complete operator-owned configuration used by web requests."""
+    values = _environment(environ)
+    if values.get(ENABLE_ENV) != ENABLE_VALUE:
+        raise ManagedSessionConfigError(
+            f"set {ENABLE_ENV}={ENABLE_VALUE} to authorize managed lifecycle mutations"
+        )
     coordinator = coordinator_from_environment(values)
+    profile = profile_from_environment(values)
+    _validate_v2_cpu_profile(profile)
+    recipe_id = managed_recipe_from_environment(coordinator, values)
+    return coordinator, profile, recipe_id
+
+
+def lifecycle_from_request(
+    api_key: str,
+    environ: Mapping[str, str] | None = None,
+    *,
+    transport: Transport | None = None,
+) -> tuple[SessionLifecycleService, ManagedProfile]:
+    """Build a lifecycle service using a request-scoped user API key.
+
+    Resource policy remains entirely server-owned.  The key is handed directly
+    to the short-lived provider adapter and is never written to coordinator
+    state or copied into the managed profile.
+    """
+    values = _environment(environ)
+    if not isinstance(api_key, str) or not api_key:
+        raise ManagedSessionConfigError("a request-scoped RunPod API key is required")
+    if values.get(ENABLE_ENV) != ENABLE_VALUE:
+        raise ManagedSessionConfigError(
+            f"set {ENABLE_ENV}={ENABLE_VALUE} to authorize managed lifecycle mutations"
+        )
+    coordinator = coordinator_from_environment(values)
+    profile = profile_from_environment(values)
+    _validate_v2_cpu_profile(profile)
     provider = RunPodLifecycleAdapter(api_key, allow_mutations=True, transport=transport)
     return SessionLifecycleService(coordinator, provider), profile
+
+
+def lifecycle_from_environment(
+    environ: Mapping[str, str] | None = None,
+    *,
+    transport: Transport | None = None,
+) -> tuple[SessionLifecycleService, ManagedProfile]:
+    """Build the sole mutating lifecycle path after explicit operator opt-in."""
+    values = _environment(environ)
+    api_key = values.get(API_KEY_ENV)
+    if not isinstance(api_key, str) or not api_key:
+        raise ManagedSessionConfigError(f"{API_KEY_ENV} is required for managed lifecycle mutations")
+    return lifecycle_from_request(api_key, values, transport=transport)
 
 
 def _parser() -> argparse.ArgumentParser:

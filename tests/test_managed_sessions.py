@@ -8,16 +8,20 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from coordinator import ManagedSessionConfigError
+from coordinator import ManagedSessionConfigError, SessionCoordinator
 from coordinator.managed_sessions import (
     API_KEY_ENV,
     ENABLE_ENV,
     ENABLE_VALUE,
     PROFILE_ENV,
     ROOT_ENV,
+    RECIPE_ENV,
     lifecycle_from_environment,
+    lifecycle_from_request,
+    managed_configuration_from_environment,
     main,
 )
+from resource_plan import compile_model_resource_plan
 
 
 class FakeLifecycleService:
@@ -74,6 +78,34 @@ class ManagedSessionTests(unittest.TestCase):
         self.assertEqual(profile.profile_id, "operator-profile")
         self.assertTrue(service.provider.allow_mutations)
         self.assertEqual(service.provider.api_key, "server-only-key")
+
+    def test_web_lifecycle_uses_request_key_without_an_environment_key(self):
+        environment = dict(self.environment)
+        environment.pop(API_KEY_ENV)
+        service, profile = lifecycle_from_request(
+            "request-only-key", environment, transport=lambda *_: (500, None),
+        )
+        self.assertEqual(profile.profile_id, "operator-profile")
+        self.assertEqual(service.provider.api_key, "request-only-key")
+        self.assertNotIn("request-only-key", self.profile_path.read_text(encoding="utf-8"))
+
+    def test_web_lifecycle_rejects_a_missing_request_key(self):
+        with self.assertRaisesRegex(ManagedSessionConfigError, "request-scoped"):
+            lifecycle_from_request("", self.environment, transport=lambda *_: (500, None))
+
+    def test_web_configuration_requires_an_existing_operator_recipe(self):
+        environment = dict(self.environment, **{RECIPE_ENV: "recipe-1"})
+        with self.assertRaisesRegex(ManagedSessionConfigError, "recipe is unavailable"):
+            managed_configuration_from_environment(environment)
+
+        coordinator = SessionCoordinator(self.directory.name)
+        coordinator.save_recipe(
+            "recipe-1", compile_model_resource_plan({}, {}), {},
+        )
+        configured, profile, recipe_id = managed_configuration_from_environment(environment)
+        self.assertEqual(configured.get_recipe("recipe-1")["recipe_id"], "recipe-1")
+        self.assertEqual(profile.profile_id, "operator-profile")
+        self.assertEqual(recipe_id, "recipe-1")
 
     def test_cli_start_delegates_without_browser_controlled_configuration(self):
         service, profile = lifecycle_from_environment(

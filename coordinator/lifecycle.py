@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import re
+import uuid
 from typing import Callable, Mapping, Protocol
 
 from .session_store import CoordinatorError, SessionCoordinator
@@ -223,14 +224,21 @@ class SessionLifecycleService:
         ownership. This service intentionally does not create a GPU endpoint:
         GPU provisioning follows verified CPU staging in a later increment.
         """
-        self.coordinator.save_profile(profile.profile_id, profile.to_dict())
-        session = self.coordinator.create_provisioning_session(
-            recipe_id, profile.profile_id, session_id=session_id,
-        )
-        return self.recover(session["session_id"], profile)
+        session_id = session_id or uuid.uuid4().hex
+        with self.coordinator.lifecycle_lock(session_id):
+            self.coordinator.save_profile(profile.profile_id, profile.to_dict())
+            session = self.coordinator.create_provisioning_session(
+                recipe_id, profile.profile_id, session_id=session_id,
+            )
+            return self._recover_locked(session["session_id"], profile)
 
     def recover(self, session_id: str, profile: ManagedProfile) -> dict[str, object]:
         """Re-run idempotent provider reconciliation after a crash or restart."""
+        with self.coordinator.lifecycle_lock(session_id):
+            return self._recover_locked(session_id, profile)
+
+    def _recover_locked(self, session_id: str, profile: ManagedProfile) -> dict[str, object]:
+        """Reconcile while the caller holds the session lifecycle lock."""
         session = self.coordinator.get_session(session_id)
         if session.get("state") in {"closed", "closing"}:
             raise LifecycleError(f"cannot recover session while {session.get('state')}")
@@ -254,6 +262,11 @@ class SessionLifecycleService:
 
     def end(self, session_id: str) -> dict[str, object]:
         """Persist closure intent and delete exact recorded resources in order."""
+        with self.coordinator.lifecycle_lock(session_id):
+            return self._end_locked(session_id)
+
+    def _end_locked(self, session_id: str) -> dict[str, object]:
+        """Close while the caller holds the session lifecycle lock."""
         session = self.coordinator.get_session(session_id)
         if session.get("state") == "closed":
             return session
