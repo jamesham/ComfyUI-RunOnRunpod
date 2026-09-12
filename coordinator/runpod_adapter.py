@@ -24,6 +24,7 @@ class RunPodAdapterError(LifecycleError):
 
 
 Transport = Callable[[str, str, Mapping[str, object] | None], tuple[int, object]]
+DebugCall = Callable[[str, str, object, int | None, object], None]
 
 
 class RunPodLifecycleAdapter:
@@ -35,12 +36,14 @@ class RunPodLifecycleAdapter:
         *,
         allow_mutations: bool = False,
         transport: Transport | None = None,
+        debug: DebugCall | None = None,
     ) -> None:
         if not isinstance(api_key, str) or not api_key:
             raise RunPodAdapterError("RunPod API key is required")
         self.api_key = api_key
         self.allow_mutations = allow_mutations
         self._transport = transport or self._http
+        self._debug = debug
 
     def _http(self, method: str, path: str, payload: Mapping[str, object] | None) -> tuple[int, object]:
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -69,7 +72,14 @@ class RunPodLifecycleAdapter:
     def _call(self, method: str, path: str, payload: Mapping[str, object] | None = None) -> object:
         if method in {"POST", "PATCH", "DELETE"} and not self.allow_mutations:
             raise RunPodAdapterError("RunPod lifecycle mutations are disabled")
-        status, value = self._transport(method, path, payload)
+        try:
+            status, value = self._transport(method, path, payload)
+        except Exception as error:
+            if self._debug:
+                self._debug(method, path, payload, None, {"error_type": type(error).__name__})
+            raise
+        if self._debug:
+            self._debug(method, path, payload, status, value)
         if status < 200 or status >= 300:
             raise RunPodAdapterError(f"RunPod {method} {path} failed with HTTP {status}: {value}")
         return value

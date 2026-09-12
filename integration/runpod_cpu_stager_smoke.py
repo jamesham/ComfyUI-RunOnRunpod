@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import uuid
 from types import SimpleNamespace
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from coordinator import ManagedProfile, RunPodLifecycleAdapter, SessionCoordinator, SessionLifecycleService
 from cpu_stager_client import stage_models
@@ -24,6 +25,9 @@ from resource_plan import ModelIdentity, compile_model_resource_plan
 
 
 _SECRET_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_SENSITIVE_DEBUG_FIELDS = frozenset({
+    "authorization", "apikey", "token", "secret", "password", "credential", "hmac", "signedrequest",
+})
 
 
 def _secret_reference(name: str) -> str:
@@ -39,12 +43,36 @@ def _environment_value(name: str) -> str:
     return value
 
 
+def _debug_value(value: object, field_name: str = "") -> object:
+    """Return a JSON-safe diagnostic representation without credential material."""
+    normalized_name = re.sub(r"[^a-z0-9]", "", field_name.lower())
+    if normalized_name in _SENSITIVE_DEBUG_FIELDS:
+        return "<redacted>"
+    if isinstance(value, Mapping):
+        if normalized_name == "env":
+            return {str(name): "<redacted>" for name in value}
+        return {str(name): _debug_value(content, str(name)) for name, content in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_debug_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _debug_api_call(method: str, path: str, request: object, status: int | None, result: object) -> None:
+    print("RUNPOD API", json.dumps({
+        "method": method, "path": path, "request": _debug_value(request),
+        "status": status, "result": _debug_value(result),
+    }, sort_keys=True), file=sys.stderr, flush=True)
+
+
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create, exercise, inspect, and delete a temporary RunPod CPU stager session.",
     )
     parser.add_argument("--live", action="store_true", help="required acknowledgement of billable provider operations")
     parser.add_argument("--pause-after-create", action="store_true", help="wait for Enter after creation before staging and cleanup")
+    parser.add_argument("--debug", action="store_true", help="log redacted RunPod API requests and results to stderr")
     parser.add_argument("--api-key-env", default="RUNPOD_API_KEY", help="environment variable holding the RunPod API key")
     parser.add_argument("--signing-key-env", default="RUNONRUNPOD_CPU_STAGING_SIGNING_KEY", help="environment variable holding the CPU HMAC value")
     parser.add_argument("--data-center", required=True, help="RunPod data-center ID for volume and CPU endpoint")
@@ -142,7 +170,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         root = Path(temporary_root.name)
 
     coordinator = SessionCoordinator(root)
-    provider = RunPodLifecycleAdapter(api_key, allow_mutations=True)
+    debug_call = _debug_api_call if arguments.debug else None
+    provider = RunPodLifecycleAdapter(api_key, allow_mutations=True, debug=debug_call)
     service = SessionLifecycleService(coordinator, provider)
     created = False
     outcome = 1
@@ -161,6 +190,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         endpoint_id = session["bindings"]["cpu_endpoint_id"]
         result = asyncio.run(stage_models(
             endpoint_id, api_key, envelope, timeout_seconds=arguments.stage_timeout_seconds,
+            on_api_call=debug_call,
         ))
         coordinator.record_stage_result(session_id, "smoke-stage", result)
         print("STAGED", {"target_path": download["dest_path"], "sha256": arguments.sha256, "size": arguments.size}, flush=True)

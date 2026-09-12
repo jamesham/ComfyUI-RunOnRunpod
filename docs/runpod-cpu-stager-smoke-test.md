@@ -87,6 +87,11 @@ volume attachment, and environment-variable *names* in RunPod. Press Enter to
 resume the single download and cleanup. Without the flag, the harness proceeds
 non-interactively.
 
+Add `--debug` to write a line for every RunPod lifecycle and Serverless API
+call to stderr. Each line includes the method, path, HTTP status, and a
+redacted request/result summary. Authorization headers, HMACs, tokens, signed
+requests, and all endpoint environment-variable values are redacted.
+
 ## Cleanup and failure behavior
 
 Cleanup runs in `finally` after a successfully recorded session, including

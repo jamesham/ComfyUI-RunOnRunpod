@@ -12,6 +12,8 @@ from cpu_staging_contract import sign_stage_request
 
 
 class FakeResponse:
+    status = 200
+
     def __init__(self, value):
         self.value = value
 
@@ -72,10 +74,14 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
             {"status": "COMPLETED", "output": self.result},
         ])
         progress = []
+        api_calls = []
         aiohttp = SimpleNamespace(ClientSession=lambda: session)
         with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
              patch("cpu_stager_client.asyncio.sleep", new=AsyncMock()) as sleep:
-            result = await stage_models("cpu-endpoint", "api-key", self.envelope, progress.append)
+            result = await stage_models(
+                "cpu-endpoint", "api-key", self.envelope, progress.append,
+                on_api_call=lambda *call: api_calls.append(call),
+            )
 
         self.assertEqual(result, self.result)
         self.assertEqual(progress, [{"results": []}])
@@ -89,6 +95,11 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.posts[0][1]["json"], {"input": {"signed_request": self.envelope}})
         self.assertEqual(len(session.gets), 2)
         self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(api_calls[0], (
+            "POST", "https://api.runpod.ai/v2/cpu-endpoint/run",
+            {"operation_id": "prep-1", "model_count": 1}, 200, {"id": "job-1"},
+        ))
+        self.assertEqual([call[0] for call in api_calls[1:]], ["GET", "GET"])
 
     async def test_terminal_failure_is_reported_without_accepting_output(self):
         session = FakeSession({"id": "job-1"}, [{"status": "FAILED", "error": "download failed"}])

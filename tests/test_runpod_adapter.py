@@ -98,6 +98,23 @@ class RunPodAdapterTests(unittest.TestCase):
             self.adapter(mutations=False).ensure_volume(self.profile, "session-1")
         self.assertEqual([request[:2] for request in self.rest.requests], [("GET", "/network-volumes")])
 
+    def test_debug_callback_receives_each_lifecycle_request_and_result(self):
+        calls = []
+        adapter = RunPodLifecycleAdapter(
+            "test-key", allow_mutations=True, transport=self.rest,
+            debug=lambda *call: calls.append(call),
+        )
+        adapter.ensure_volume(self.profile, "session-1")
+
+        self.assertEqual([(call[0], call[1], call[3]) for call in calls], [
+            ("GET", "/network-volumes", 200),
+            ("POST", "/network-volumes", 201),
+        ])
+        self.assertEqual(calls[1][2], {
+            "name": "runonrunpod-volume-session-1", "size": 100, "dataCenter": "dc-1",
+        })
+        self.assertEqual(calls[1][4]["id"], "vol-1")
+
     def test_creates_cpu_endpoint_with_volume_and_cpu_limits(self):
         adapter = self.adapter()
         volume = adapter.ensure_volume(self.profile, "session-1")

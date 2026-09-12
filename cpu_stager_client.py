@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Callable
 
 try:  # Plugin package import; direct integration-harness import fallback.
     from .cpu_staging_contract import CpuStagingContractError, unsigned_stage_payload, validate_stage_result
@@ -15,6 +16,9 @@ class CpuStagerError(RuntimeError):
     pass
 
 
+ApiCallTrace = Callable[[str, str, object, int | None, object], None]
+
+
 async def stage_models(
     endpoint_id: str,
     api_key: str,
@@ -23,6 +27,7 @@ async def stage_models(
     *,
     timeout_seconds: float | None = None,
     poll_interval_seconds: float = 1,
+    on_api_call: ApiCallTrace | None = None,
 ) -> dict[str, object]:
     """Run a signed CPU stage request and return its validated final result."""
     if not isinstance(endpoint_id, str) or not endpoint_id:
@@ -41,6 +46,10 @@ async def stage_models(
         "User-Agent": "ComfyUI-RunOnRunpod",
     }
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    request_summary = {
+        "operation_id": request.get("operation_id"),
+        "model_count": len(request.get("models", [])),
+    }
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"https://api.runpod.ai/v2/{endpoint_id}/run",
@@ -48,6 +57,12 @@ async def stage_models(
             json={"input": {"signed_request": signed_request}},
         ) as response:
             submitted = await response.json()
+            submitted_status = getattr(response, "status", None)
+        if on_api_call:
+            on_api_call(
+                "POST", f"https://api.runpod.ai/v2/{endpoint_id}/run",
+                request_summary, submitted_status, submitted,
+            )
         job_id = submitted.get("id") if isinstance(submitted, dict) else None
         if not job_id:
             raise CpuStagerError(f"CPU staging submission failed: {submitted}")
@@ -64,6 +79,12 @@ async def stage_models(
                 f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}", headers=headers,
             ) as response:
                 status = await response.json()
+                status_code = getattr(response, "status", None)
+            if on_api_call:
+                on_api_call(
+                    "GET", f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}",
+                    None, status_code, status,
+                )
             state = status.get("status") if isinstance(status, dict) else None
             output = status.get("output") if isinstance(status, dict) else None
             if state == "IN_PROGRESS" and isinstance(output, dict) and on_progress:

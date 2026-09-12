@@ -7,7 +7,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from integration.runpod_cpu_stager_smoke import _profile, _secret_reference, run
+from integration.runpod_cpu_stager_smoke import _debug_api_call, _profile, _secret_reference, run
 
 
 class RunPodCpuStagerSmokeTests(unittest.TestCase):
@@ -27,6 +27,41 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
     def test_secret_reference_rejects_unsafe_name(self):
         with self.assertRaisesRegex(ValueError, "secret names"):
             _secret_reference("bad secret")
+
+    def test_debug_output_redacts_credentials_and_environment_values(self):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            _debug_api_call("POST", "/serverless", {
+                "Authorization": "api-key", "env": {"HF_TOKEN": "provider-token"},
+                "signed_request": "signed-envelope",
+            }, 201, {"token": "result-token", "id": "endpoint-1"})
+        value = output.getvalue()
+        self.assertIn('"status": 201', value)
+        self.assertIn('"id": "endpoint-1"', value)
+        self.assertNotIn("api-key", value)
+        self.assertNotIn("provider-token", value)
+        self.assertNotIn("signed-envelope", value)
+        self.assertNotIn("result-token", value)
+
+    def test_debug_flag_passes_the_trace_callback_to_both_runpod_clients(self):
+        coordinator = Mock()
+        service = Mock()
+        service.start.return_value = {
+            "session_id": "smoke-test", "state": "preparing",
+            "bindings": {"volume_id": "volume-1", "cpu_endpoint_id": "cpu-1"},
+        }
+        service.end.return_value = {"session_id": "smoke-test", "state": "closed", "bindings": {}}
+        coordinator.authorize_stage.return_value = {"payload": "signed"}
+        arguments = self._live_arguments() + ["--debug"]
+        with patch("integration.runpod_cpu_stager_smoke.uuid.uuid4", return_value=SimpleNamespace(hex="test")), \
+             patch("integration.runpod_cpu_stager_smoke.SessionCoordinator", return_value=coordinator), \
+             patch("integration.runpod_cpu_stager_smoke.RunPodLifecycleAdapter") as adapter, \
+             patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
+             patch("integration.runpod_cpu_stager_smoke.stage_models", new_callable=Mock, return_value={"status": "success", "results": []}) as stage, \
+             patch("integration.runpod_cpu_stager_smoke.asyncio.run", return_value={"status": "success", "results": []}), \
+             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False):
+            self.assertEqual(run(arguments), 0)
+        self.assertIs(adapter.call_args.kwargs["debug"], stage.call_args.kwargs["on_api_call"])
 
     def test_run_records_result_then_cleans_exact_session(self):
         coordinator = Mock()
