@@ -133,9 +133,7 @@ Requirements:
 - Persist recovery information independently of the disposable volume.
 - Every HTTP request to a RunPod-operated API must explicitly set a project
   User-Agent header; client-library default User-Agent values are prohibited.
-- Replace every RunPod REST API v1 call with its validated v2 equivalent before
-  November 15, 2026, when RunPod retires v1. This includes the lifecycle
-  adapter and the live CPU-stager smoke harness that uses it.
+- RunPod REST API v1 is deprecated. Do not use it in new code.
 
 Non-goals for the initial implementation:
 
@@ -282,24 +280,6 @@ construction; every direct request path must do the same. Tests for each
 transport must assert the explicit value, including failure paths where the
 request is observable. Debug output may display the User-Agent but must
 continue to redact authorization and cookie values.
-
-### REST API v1 retirement migration
-
-RunPod REST API v1 is deprecated and scheduled for retirement on November 15,
-2026. Therefore this project **MUST** remove every v1 control-plane call before
-that date. The blocking migration scope includes `RunPodLifecycleAdapter`, its
-operator CLI, the CPU-stager smoke harness, and all tests, documentation, and
-future transports that invoke the lifecycle path. No production or live-test
-path may retain `https://rest.runpod.io/v1` after the migration.
-
-Migrate to `https://api.runpod.io/v2` using RunPod's published [v1-to-v2
-migration guide](https://docs.runpod.io/api-reference-v2/migrate-from-v1), not
-by changing only the base URL. In particular, map network volumes to
-`/v2/network-volumes`, Serverless endpoints to `/v2/serverless`, update nested
-create payloads, unwrap v2 collection responses, and handle the v2 RFC 9457
-error shape. Complete hermetic request/response contract tests and the
-explicitly opt-in live CPU-stager validation against v2 before treating the
-CPU-staging lifecycle as deployable.
 
 ## 5. Credentials and secret delivery
 
