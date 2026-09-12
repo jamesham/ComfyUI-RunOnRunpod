@@ -46,6 +46,7 @@ from .coordinator import (
     lifecycle_from_request,
     managed_configuration_from_environment,
     managed_recipe_from_environment,
+    validate_v2_gpu_profile,
 )
 
 _PREFIX = "[RunOnRunpod]"
@@ -223,10 +224,16 @@ async def verify_settings(request):
 
     # Check RunPod API key + endpoint
     api_key = settings.get("apiKey", "")
-    endpoint_id = settings.get("endpointId", "")
-    if not api_key or not endpoint_id:
-        results["errors"].append("API Key and Endpoint ID are required")
-    else:
+    mode = None
+    try:
+        mode = _staging_mode(settings)
+        endpoint_id = _endpoint_id_for_settings(settings)
+    except _SubmitError as error:
+        results["errors"].append(error.message)
+        endpoint_id = ""
+    if not api_key:
+        results["errors"].append("RunPod API Key is required")
+    elif endpoint_id:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -242,7 +249,14 @@ async def verify_settings(request):
         except Exception as e:
             results["errors"].append(f"RunPod API error: {e}")
 
-    # Check S3 credentials + bucket
+    # CPU-managed mode deliberately has no S3 credential requirement.
+    if mode == STAGING_MODE_CPU:
+        results["s3_storage"] = True
+        if results["errors"]:
+            print(_PREFIX, f"Verify failed: {results['errors']}")
+        return web.json_response(results)
+
+    # Check S3 credentials + bucket for the compatible GPU-only path.
     bucket = settings.get("bucketName", "")
     s3_access = settings.get("s3AccessKey", "")
     s3_secret = settings.get("s3SecretKey", "")
@@ -452,15 +466,74 @@ def _managed_lifecycle_for_settings(
     settings: dict,
     *,
     require_signing_key: bool,
+    require_gpu_profile: bool = True,
 ):
     api_key = settings.get("apiKey") if isinstance(settings, dict) else None
     service, profile = lifecycle_from_request(api_key, os.environ)
+    if require_gpu_profile:
+        validate_v2_gpu_profile(profile)
     recipe_id = managed_recipe_from_environment(service.coordinator, os.environ)
     if require_signing_key and not os.environ.get(MANAGED_SIGNING_KEY_ENV):
         raise ManagedSessionConfigError(
             f"{MANAGED_SIGNING_KEY_ENV} is required for managed CPU staging"
         )
     return service, profile, recipe_id
+
+
+def _managed_gpu_endpoint_id(settings: dict) -> str:
+    """Resolve the session-owned GPU endpoint without trusting a UI ID."""
+    session_id = settings.get("managedSessionId") if isinstance(settings, dict) else None
+    if not isinstance(session_id, str) or not session_id:
+        raise _SubmitError("CPU managed staging requires an active managed session")
+    try:
+        coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
+        session = coordinator.get_session(session_id)
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+    except (CoordinatorError, LifecycleError) as error:
+        raise _SubmitError(f"Managed GPU endpoint could not be authorized: {error}") from None
+    bindings = session.get("bindings")
+    endpoint_id = bindings.get("gpu_endpoint_id") if isinstance(bindings, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id:
+        raise _SubmitError("Managed session has no GPU endpoint yet")
+    return endpoint_id
+
+
+def _endpoint_id_for_settings(settings: dict) -> str:
+    """Use durable session ownership in CPU mode and the UI setting in GPU mode."""
+    if _staging_mode(settings) == STAGING_MODE_CPU:
+        return _managed_gpu_endpoint_id(settings)
+    endpoint_id = settings.get("endpointId")
+    if not isinstance(endpoint_id, str) or not endpoint_id:
+        raise _SubmitError("RunPod Endpoint ID is required")
+    return endpoint_id
+
+
+async def _ensure_managed_gpu_endpoint(
+    settings: dict, operation: "_CpuArtifactOperation",
+) -> str:
+    """Cross the CPU-ready boundary by creating/reconciling the GPU endpoint."""
+    try:
+        service, profile, recipe_id = _managed_lifecycle_for_settings(
+            settings, require_signing_key=True,
+        )
+        session = service.coordinator.get_session(operation.session_id)
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+        updated = await asyncio.to_thread(
+            service.ensure_gpu_endpoint, operation.session_id, profile,
+        )
+    except (CoordinatorError, LifecycleError) as error:
+        raise _SubmitError(
+            f"Managed GPU endpoint provisioning failed: {error}",
+            log=f"managed GPU lifecycle: {error}",
+        ) from None
+    bindings = updated.get("bindings")
+    endpoint_id = bindings.get("gpu_endpoint_id") if isinstance(bindings, dict) else None
+    volume_binding = bindings.get("volume_binding") if isinstance(bindings, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id:
+        raise _SubmitError("Managed GPU provisioning returned no endpoint ID")
+    if volume_binding != operation.volume_binding:
+        raise _SubmitError("Managed GPU provisioning changed the session volume binding")
+    return endpoint_id
 
 
 def _managed_session_is_active(session_id: str) -> bool:
@@ -575,7 +648,7 @@ async def end_managed_session(request):
                 "managed session still has an active preparation or workflow job"
             )
         service, profile, recipe_id = _managed_lifecycle_for_settings(
-            settings, require_signing_key=False,
+            settings, require_signing_key=False, require_gpu_profile=False,
         )
         session = service.coordinator.get_session(session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
@@ -588,9 +661,14 @@ async def end_managed_session(request):
 
 def _validate_settings(settings: dict, staging_mode: str | None = None) -> None:
     """Validate only the credentials used by the selected staging mode."""
-    if not settings.get("apiKey") or not settings.get("endpointId"):
-        raise _SubmitError("RunPod API Key and Endpoint ID are required")
     mode = staging_mode or _staging_mode(settings)
+    if not settings.get("apiKey"):
+        raise _SubmitError("RunPod API Key is required")
+    if mode == STAGING_MODE_CPU:
+        if not settings.get("managedSessionId"):
+            raise _SubmitError("CPU managed staging requires an active managed session")
+    elif not settings.get("endpointId"):
+        raise _SubmitError("RunPod API Key and Endpoint ID are required")
     if mode == STAGING_MODE_GPU and not all(
         settings.get(k) for k in ("bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl")
     ):
@@ -1500,6 +1578,7 @@ async def _submit_workflow_to_runpod(
     return web.json_response({
         "job_id": job_id,
         "status": result.get("status", "IN_QUEUE"),
+        "endpoint_id": endpoint_id,
     })
 
 
@@ -1520,6 +1599,7 @@ async def _do_submit(data: dict):
 
     api_key = settings.get("apiKey", "")
     endpoint_id = settings.get("endpointId", "")
+    effective_settings = settings
 
     try:
         mode = _staging_mode(settings)
@@ -1538,6 +1618,9 @@ async def _do_submit(data: dict):
                 model_preparation, settings, prep_id, cpu_operation,
             )
             _raise_if_cancelled(prep_id, "CPU preparation")
+            _send_event("progress", {"prep_id": prep_id, "message": "Provisioning GPU endpoint..."})
+            endpoint_id = await _ensure_managed_gpu_endpoint(settings, cpu_operation)
+            effective_settings = {**settings, "endpointId": endpoint_id}
             await _validate_cpu_gpu_volume(endpoint_id, api_key, cpu_operation.volume_binding)
             _send_event("progress", {"prep_id": prep_id, "message": "Waiting for GPU worker..."})
             await _validate_runpod_health(endpoint_id, api_key)
@@ -1569,7 +1652,7 @@ async def _do_submit(data: dict):
 
         _send_event("progress", {"prep_id": prep_id, "message": "Submitting to RunPod..."})
         return await _submit_workflow_to_runpod(
-            endpoint_id, api_key, workflow, input_files, settings, prep_id,
+            endpoint_id, api_key, workflow, input_files, effective_settings, prep_id,
         )
     except _SubmitError as e:
         print(_PREFIX, e.log or e.message)
@@ -1767,7 +1850,10 @@ async def cancel_job(request):
         task.cancel()
 
     api_key = settings.get("apiKey", "")
-    endpoint_id = settings.get("endpointId", "")
+    try:
+        endpoint_id = _endpoint_id_for_settings(settings)
+    except _SubmitError as error:
+        return web.json_response({"error": error.message}, status=400)
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -1796,10 +1882,8 @@ async def purge_queue(request):
     data = await request.json()
     settings = data.get("settings", {})
     api_key = settings.get("apiKey", "")
-    endpoint_id = settings.get("endpointId", "")
-
-    if not api_key or not endpoint_id:
-        return web.json_response({"error": "API key and endpoint ID required"}, status=400)
+    if not api_key:
+        return web.json_response({"error": "API key required"}, status=400)
 
     # Mark every known prep as cancelled. Callers send in-progress prep_ids
     # in the body so we can also cancel preps we haven't seen yet via the
@@ -1808,6 +1892,17 @@ async def purge_queue(request):
     for pid in prep_ids:
         if pid:
             _cancelled_preps.add(pid)
+
+    try:
+        endpoint_id = _endpoint_id_for_settings(settings)
+    except _SubmitError as error:
+        if _staging_mode(settings) == STAGING_MODE_CPU and not _active_tasks:
+            return web.json_response({
+                "cancelled_jobs": 0,
+                "cancelled_preps": len(prep_ids),
+                "purge_result": {"status": "no managed GPU endpoint"},
+            })
+        return web.json_response({"error": error.message}, status=400)
 
     headers = {"Authorization": f"Bearer {api_key}"}
     tracked_job_ids = list(_active_tasks.keys())
@@ -1899,7 +1994,6 @@ async def recover_jobs(request):
     job_ids = data.get("job_ids", []) or []
     prep_ids = data.get("prep_ids", []) or []
     api_key = settings.get("apiKey", "")
-    endpoint_id = settings.get("endpointId", "")
 
     # Resolve prep_ids against the in-memory set of preps the backend
     # is currently working on. If the prep is still active, the
@@ -1916,10 +2010,16 @@ async def recover_jobs(request):
         else:
             preps.append({"prep_id": prep_id, "state": "lost"})
 
+    try:
+        endpoint_id = _endpoint_id_for_settings(settings)
+    except _SubmitError:
+        endpoint_id = ""
+
     if not api_key or not endpoint_id:
         # Without RunPod credentials we can still report prep state.
         return web.json_response({"recovered": [], "preps": preps})
 
+    effective_settings = {**settings, "endpointId": endpoint_id}
     recovered: list[dict] = []
 
     async with aiohttp.ClientSession() as session:
@@ -1954,10 +2054,10 @@ async def recover_jobs(request):
                 try:
                     output_files = _completed_output_files(result)
                     # The original input upload context is unavailable.
-                    if _staging_mode(settings) == STAGING_MODE_CPU:
-                        downloaded = await _download_and_cleanup_cpu(settings, output_files, {})
+                    if _staging_mode(effective_settings) == STAGING_MODE_CPU:
+                        downloaded = await _download_and_cleanup_cpu(effective_settings, output_files, {})
                     else:
-                        downloaded = await _download_and_cleanup(settings, output_files, {})
+                        downloaded = await _download_and_cleanup(effective_settings, output_files, {})
                 except OutputRetrievalError as e:
                     entry["state"] = "failed"
                     entry["error"] = str(e)
@@ -1967,7 +2067,7 @@ async def recover_jobs(request):
             elif status in ("IN_QUEUE", "IN_PROGRESS"):
                 entry["state"] = "running" if status == "IN_PROGRESS" else "queued"
                 if not already_polling:
-                    task = asyncio.create_task(_poll_and_finish(job_id, settings, {}))
+                    task = asyncio.create_task(_poll_and_finish(job_id, effective_settings, {}))
                     _active_tasks[job_id] = task
                     managed_session_id = settings.get("managedSessionId")
                     if isinstance(managed_session_id, str) and managed_session_id:

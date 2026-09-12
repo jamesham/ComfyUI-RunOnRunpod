@@ -228,7 +228,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         settings = dict(
             self.settings, stagingMode="cpu", managedSessionId="session-1",
         )
-        for key in ("bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl"):
+        for key in ("endpointId", "bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl"):
             settings.pop(key)
         operation = SimpleNamespace(
             endpoint_id="cpu-endpoint", volume_binding="volume-1", signing_key="hmac",
@@ -252,20 +252,27 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         async def binding(*_args):
             order.append("binding")
 
+        async def provision(*_args):
+            order.append("provision")
+            return "managed-gpu"
+
         async def version(*_args):
             order.append("version")
 
         async def nodes(*_args):
             order.append("nodes")
 
-        async def submit(*_args):
+        async def submit(*args):
             order.append("submit")
+            self.assertEqual(args[0], "managed-gpu")
+            self.assertEqual(args[4]["endpointId"], "managed-gpu")
             return {"job_id": "job-1"}
 
         with patch.object(self.routes, "_managed_cpu_artifact_operation", return_value=operation), \
              patch.object(self.routes, "_plan_cpu_model_preparation", new=plan), \
              patch.object(self.routes, "_upload_cpu_input_files", new=inputs), \
              patch.object(self.routes, "_execute_cpu_model_preparation", new=execute), \
+             patch.object(self.routes, "_ensure_managed_gpu_endpoint", new=provision), \
              patch.object(self.routes, "_validate_cpu_gpu_volume", new=binding), \
              patch.object(self.routes, "_validate_runpod_health", new=health), \
              patch.object(self.routes, "_fetch_and_check_worker_version", new=version), \
@@ -276,7 +283,9 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
                 "settings": settings, "workflow": {}, "prep_id": "prep-1",
             })
         self.assertEqual(result, {"job_id": "job-1"})
-        self.assertEqual(order, ["plan", "inputs", "stage", "binding", "health", "version", "nodes", "submit"])
+        self.assertEqual(order, [
+            "plan", "inputs", "stage", "provision", "binding", "health", "version", "nodes", "submit",
+        ])
 
     def test_invalid_staging_mode_is_rejected(self):
         with self.assertRaisesRegex(self.routes._SubmitError, "Staging mode"):

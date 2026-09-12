@@ -58,10 +58,49 @@ The sidebar's **Start / Recover Session** action persists its generated session
 ID before creating the volume and CPU endpoint, making a retry reconcile the
 same recorded resources. **End Session** refuses while this backend is tracking
 active work and requires an explicit confirmation that wanted outputs are local.
-The existing GPU endpoint still has to be attached to the returned session
-volume; automatic managed GPU endpoint creation/attachment is the next lifecycle
-increment. If that endpoint remains attached, RunPod can refuse volume deletion;
-the session remains recoverable and cleanup can be retried after detaching it.
+After CPU preparation succeeds, the first submission creates a scale-to-zero GPU
+endpoint from the operator profile and attaches the same session volume. The
+browser's manually configured Endpoint ID is ignored in CPU mode and remains
+unchanged for GPU-only mode. Session recovery reconciles every already-created
+endpoint, and **End Session** deletes the GPU endpoint before the CPU endpoint
+and volume.
+
+The profile remains `profile_version: 1` and now needs an explicit GPU policy
+for browser-managed CPU sessions. For example:
+
+```json
+{
+  "profile_version": 1,
+  "profile_id": "creative-session",
+  "data_center": "EU-RO-1",
+  "volume": {"size_gb": 100},
+  "cpu": {
+    "image": "james0x2a/runpod-comfy@sha256:<cpu-image-digest>",
+    "template_id": "<cpu-template-id>",
+    "flavor_ids": ["cpu3c"],
+    "vcpu_count": 4,
+    "environment": {
+      "STAGING_REQUEST_HMAC_KEY": "{{ RUNPOD_SECRET_cpu-stager-hmac }}",
+      "HF_TOKEN": "{{ RUNPOD_SECRET_huggingface-token }}"
+    }
+  },
+  "gpu": {
+    "image": "james0x2a/runpod-comfy@sha256:<gpu-image-digest>",
+    "pool_ids": ["ADA_24"],
+    "count": 1,
+    "disk_gb": 50,
+    "min_workers": 0,
+    "max_workers": 1,
+    "idle_timeout_seconds": 5,
+    "execution_timeout_ms": 3600000,
+    "environment": {}
+  }
+}
+```
+
+Provider credentials belong only in the CPU environment for CPU-managed mode;
+the profile validator rejects `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, and
+`CIVITAI_API_KEY` in its GPU environment.
 
 The management CLI remains available for operator recovery. `start` and
 `recover` use the profile chosen by the server environment; `status` reads only

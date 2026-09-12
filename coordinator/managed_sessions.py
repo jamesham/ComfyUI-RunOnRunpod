@@ -73,6 +73,14 @@ def _validate_v2_cpu_profile(profile: ManagedProfile) -> None:
         )
 
 
+def validate_v2_gpu_profile(profile: ManagedProfile) -> None:
+    """Require the operator-owned fields used for managed GPU creation."""
+    if not profile.gpu_image or not profile.gpu_pool_ids:
+        raise ManagedSessionConfigError(
+            "managed profile GPU configuration requires image and pool_ids"
+        )
+
+
 def managed_recipe_from_environment(
     coordinator: SessionCoordinator,
     environ: Mapping[str, str] | None = None,
@@ -100,6 +108,7 @@ def managed_configuration_from_environment(
     coordinator = coordinator_from_environment(values)
     profile = profile_from_environment(values)
     _validate_v2_cpu_profile(profile)
+    validate_v2_gpu_profile(profile)
     recipe_id = managed_recipe_from_environment(coordinator, values)
     return coordinator, profile, recipe_id
 

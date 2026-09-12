@@ -96,17 +96,28 @@ Implemented next: CPU-managed submission now has an authenticated, coordinator-
 signed artifact boundary over the RunPod Serverless job API. Bounded chunks can
 install local models and workflow inputs under the session volume, retrieve
 outputs, and perform per-job cleanup without an S3 client, bucket, or S3
-credential. CPU preparation is completed before GPU health/version/node checks;
-the configured GPU endpoint is also checked through the RunPod API for the same
-session-volume binding before inference;
+credential. CPU preparation is completed before GPU endpoint creation and
+health/version/node checks; the session-owned endpoint is checked through the
+RunPod API for the same volume binding before inference;
 GPU-only mode retains its existing S3 and GPU preparation order. The browser
 now has guarded start/status/recover/end routes and additive sidebar controls.
 They use the plugin's RunPod API key only for the current request while the
 profile, recipe, signing key, state root, images, secret mappings, region, and
 resource sizes remain server-owned. The browser-generated session ID is saved
 before creation so a lost response can reconcile the same durable resource
-intent. Managed GPU endpoint creation/attachment and fresh-session recipe
-restoration remain the next lifecycle integration steps.
+intent. This established the boundary used by the following lifecycle
+increment.
+
+Implemented next: after CPU artifacts are successfully staged, the lifecycle
+service creates a queue-based, scale-to-zero GPU endpoint from explicit
+operator-owned image, pool, count, disk, timeout, and environment policy. It
+attaches the exact recorded session volume, verifies the effective RunPod v2
+response, journals the endpoint binding, and reconciles it on recovery. CPU
+mode no longer requires or overwrites the browser's GPU-only endpoint setting.
+Closure uses the GPU-before-CPU-before-volume order. The managed GPU environment
+rejects model-provider credential names, so CPU-mode inference cannot silently
+become a source downloader. Fresh-session recipe restoration is now the next
+lifecycle integration step.
 
 ## 1. Objective and scope
 
@@ -843,9 +854,10 @@ tested RunPod REST lifecycle adapter are implemented. An operator-only,
 environment-gated CLI and guarded browser routes now wire that adapter. Browser
 mutations use a request-scoped plugin API key while operator policy remains in
 server-owned configuration. The UI/backend staging-mode contract is implemented
-with GPU compatibility as its default. Managed GPU endpoint provisioning,
-durable upload/output ledgers, automatic recipe capture/restoration, and a
-deployed CPU endpoint remain outstanding.
+with GPU compatibility as its default. Managed GPU endpoint provisioning after
+successful CPU staging is implemented. Durable upload/output ledgers,
+automatic recipe capture/restoration, and a deployed CPU endpoint remain
+outstanding.
 
 Acceptance: hermetic tests prove that CPU mode makes no GPU `/run` request with
 unresolved, staging, failed, or uninstalled requirements, while GPU-only mode
@@ -887,8 +899,10 @@ its existing S3-backed behavior.
 Progress: guarded browser start/status/recover/end operations now create and
 delete the recorded volume and CPU endpoint, synchronize the opaque session ID,
 retain retryable state after partial failures, and hold a cross-process session
-lock across each intent/provider-call/receipt sequence. GPU endpoint lifecycle
-and automatic recipe capture/restoration are not yet connected.
+lock across each intent/provider-call/receipt sequence. After CPU preparation,
+the submission path creates and verifies the recorded GPU endpoint on the same
+volume; recovery reconciles it and closure deletes it first. Automatic recipe
+capture/restoration is not yet connected.
 
 Acceptance: tests cover uncertain creates, crashes between remote writes and
 local recording, stale coordinators, partial cleanup, and fresh session IDs.

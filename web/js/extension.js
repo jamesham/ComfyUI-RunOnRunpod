@@ -536,10 +536,10 @@ function renderJobList() {
     const s = getSettings();
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
-    if (!s.endpointId) missing.push("Endpoint ID");
     if (s.stagingMode === "cpu") {
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
+        if (!s.endpointId) missing.push("Endpoint ID");
         if (!s.s3AccessKey) missing.push("S3 Access Key");
         if (!s.s3SecretKey) missing.push("S3 Secret Key");
         if (!s.endpointUrl) missing.push("Endpoint URL");
@@ -568,10 +568,10 @@ async function submitJob() {
     const s = getSettings();
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
-    if (!s.endpointId) missing.push("Endpoint ID");
     if (s.stagingMode === "cpu") {
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
+        if (!s.endpointId) missing.push("Endpoint ID");
         if (!s.s3AccessKey) missing.push("S3 Access Key");
         if (!s.s3SecretKey) missing.push("S3 Secret Key");
         if (!s.endpointUrl) missing.push("Endpoint URL");
@@ -658,6 +658,7 @@ async function submitJob() {
             if (oldCard) oldCard.id = `runpod-job-${job.id}`;
             renderJobCard(job);
         }
+        if (s.stagingMode === "cpu") refreshManagedSessionStatus();
     } catch (err) {
         console.error("[RunOnRunpod] Submit error:", err);
         job.state = JOB_STATE.ERROR;
@@ -696,6 +697,7 @@ function _renderManagedSession(data = null, error = "") {
     const parts = [`Managed session: ${data.state || "unknown"}`];
     if (data.volumeId) parts.push(`volume ${data.volumeId}`);
     if (data.cpuEndpointId) parts.push(`CPU ${data.cpuEndpointId}`);
+    if (data.gpuEndpointId) parts.push(`GPU ${data.gpuEndpointId}`);
     managedSessionInfoEl.textContent = parts.join(" · ");
     managedSessionInfoEl.title = [
         data.managedSessionId,
@@ -787,7 +789,7 @@ async function endManagedSession(btn) {
     }
     const confirmed = confirm(
         "End this creative session?\n\n" +
-        "The managed CPU endpoint and temporary network volume will be deleted. " +
+        "The managed GPU endpoint, CPU endpoint, and temporary network volume will be deleted. " +
         "Confirm only after all outputs you want to retain are present locally. " +
         "Deletion cannot be undone."
     );
@@ -1790,13 +1792,13 @@ app.registerExtension({
                 managedSessionStartBtn = document.createElement("button");
                 managedSessionStartBtn.className = "runpod-btn clean";
                 managedSessionStartBtn.textContent = "Start / Recover Session";
-                managedSessionStartBtn.title = "Create or reconcile the CPU staging endpoint and temporary network volume";
+                managedSessionStartBtn.title = "Create or reconcile the CPU staging endpoint and temporary network volume; the GPU endpoint is created after staging";
                 managedSessionStartBtn.addEventListener("click", () => startManagedSession(managedSessionStartBtn));
 
                 managedSessionEndBtn = document.createElement("button");
                 managedSessionEndBtn.className = "runpod-btn clean danger";
                 managedSessionEndBtn.textContent = "End Session";
-                managedSessionEndBtn.title = "Delete the managed CPU endpoint and temporary network volume";
+                managedSessionEndBtn.title = "Delete the managed GPU endpoint, CPU endpoint, and temporary network volume";
                 managedSessionEndBtn.addEventListener("click", () => endManagedSession(managedSessionEndBtn));
 
                 const sessionRow = document.createElement("div");

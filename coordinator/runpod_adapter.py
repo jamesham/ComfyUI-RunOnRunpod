@@ -169,6 +169,36 @@ class RunPodLifecycleAdapter:
         created = self._call("POST", "/serverless", payload)
         return self._verify_cpu_endpoint(created, name, profile, volume_id, cpu)
 
+    def ensure_gpu_endpoint(
+        self, profile: ManagedProfile, session_id: str, volume: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Create the scale-to-zero inference endpoint on the staged volume."""
+        if not profile.gpu_image or not profile.gpu_pool_ids:
+            raise RunPodAdapterError(
+                "managed GPU endpoint creation requires gpu.image and gpu.pool_ids"
+            )
+        volume_id = volume.get("id")
+        if not isinstance(volume_id, str) or not volume_id:
+            raise RunPodAdapterError("GPU endpoint needs a recorded volume ID")
+        name = self._name(session_id, "gpu")
+        existing = self._single_named(
+            self._list_resources("/serverless", "endpoints", "GPU endpoint"), name, "GPU endpoint",
+        )
+        if existing is not None:
+            raise RunPodAdapterError("matching GPU endpoint name is ambiguous; refuse unsafe reuse")
+        requested_gpu = {"pools": list(profile.gpu_pool_ids), "count": profile.gpu_count}
+        payload: dict[str, object] = {
+            "name": name, "image": profile.gpu_image, "type": "QUEUE",
+            "gpu": requested_gpu, "disk": profile.gpu_disk_gb,
+            "dataCenterIds": [profile.data_center], "networkVolumes": [volume_id],
+            "workers": {"min": 0, "max": 1, "idleTimeout": profile.gpu_idle_timeout_seconds},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4},
+            "timeout": profile.gpu_execution_timeout_ms,
+            "env": dict(profile.gpu_environment),
+        }
+        created = self._call("POST", "/serverless", payload)
+        return self._verify_gpu_endpoint(created, name, profile, volume_id, requested_gpu)
+
     def _verify_cpu_endpoint(
         self,
         value: object,
@@ -208,6 +238,49 @@ class RunPodLifecycleAdapter:
             raise RunPodAdapterError("RunPod CPU endpoint violates required worker limits")
         return {
             "id": value["id"], "name": name, "compute_type": "CPU", "volume_id": volume_id,
+            "ownership": {"name": name, "created_by": "runonrunpod-lifecycle-v2"},
+        }
+
+    def _verify_gpu_endpoint(
+        self,
+        value: object,
+        name: str,
+        profile: ManagedProfile,
+        volume_id: str,
+        requested_gpu: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("id"), str):
+            raise RunPodAdapterError("RunPod returned invalid GPU endpoint creation response")
+        volumes = value.get("networkVolumes")
+        gpu = value.get("gpu")
+        workers = value.get("workers")
+        scaling = value.get("scaling")
+        observed_pools = gpu.get("pools") if isinstance(gpu, Mapping) else None
+        if (
+            value.get("type") != "QUEUE"
+            or value.get("name") != name
+            or value.get("image") != profile.gpu_image
+            or not isinstance(volumes, list)
+            or volume_id not in volumes
+            or not isinstance(gpu, Mapping)
+            or not isinstance(observed_pools, list)
+            or observed_pools != requested_gpu["pools"]
+            or gpu.get("count") != requested_gpu["count"]
+        ):
+            raise RunPodAdapterError("RunPod GPU endpoint does not match requested compute/volume binding")
+        if (
+            value.get("disk") != profile.gpu_disk_gb
+            or not isinstance(workers, Mapping)
+            or workers.get("min") != 0
+            or workers.get("max") != 1
+            or not isinstance(scaling, Mapping)
+            or scaling.get("type") != "QUEUE_DELAY"
+            or scaling.get("queueDelay") != 4
+            or value.get("timeout") != profile.gpu_execution_timeout_ms
+        ):
+            raise RunPodAdapterError("RunPod GPU endpoint violates required worker limits")
+        return {
+            "id": value["id"], "name": name, "compute_type": "GPU", "volume_id": volume_id,
             "ownership": {"name": name, "created_by": "runonrunpod-lifecycle-v2"},
         }
 

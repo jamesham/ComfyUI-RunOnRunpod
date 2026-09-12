@@ -41,13 +41,20 @@ class FakeRunPodRest:
         if method == "GET" and path == "/serverless":
             return 200, {"endpoints": list(self.endpoints.values())}
         if method == "POST" and path == "/serverless":
+            compute = "cpu" if "cpu" in payload else "gpu"
             resource = {
-                "id": f"cpu-{len(self.endpoints) + 1}", "name": payload["name"],
+                "id": f"{compute}-{len(self.endpoints) + 1}", "name": payload["name"],
                 "type": "LOAD_BALANCER" if self.bad_endpoint else payload["type"],
-                "cpu": payload["cpu"], "networkVolumes": payload["networkVolumes"],
+                "networkVolumes": payload["networkVolumes"],
                 "workers": payload["workers"], "scaling": payload["scaling"],
                 "timeout": payload["timeout"],
             }
+            if compute == "cpu":
+                resource["cpu"] = payload["cpu"]
+            else:
+                resource.update({
+                    "image": payload["image"], "gpu": payload["gpu"], "disk": payload["disk"],
+                })
             self.endpoints[resource["id"]] = resource
             return 201, resource
         if method == "GET" and path.startswith("/serverless/"):
@@ -64,7 +71,10 @@ class RunPodAdapterTests(unittest.TestCase):
         self.rest = FakeRunPodRest()
         self.profile = ManagedProfile(
             "profile-1", "dc-1", 100, "cpu-image@sha256:abc",
+            gpu_image="gpu-image@sha256:def",
             cpu_template_id="template-cpu", cpu_flavor_ids=("cpu3c",), cpu_vcpu_count=4,
+            gpu_pool_ids=("ADA_24", "AMPERE_80"), gpu_disk_gb=80,
+            gpu_idle_timeout_seconds=7, gpu_execution_timeout_ms=900_000,
         )
 
     def adapter(self, *, mutations=True):
@@ -145,6 +155,21 @@ class RunPodAdapterTests(unittest.TestCase):
             "HF_TOKEN": "{{ RUNPOD_SECRET_hf_test }}", "STAGING_VOLUME_BINDING": "vol-1",
         })
 
+    def test_creates_gpu_endpoint_on_same_volume_with_scale_to_zero_policy(self):
+        adapter = self.adapter()
+        volume = adapter.ensure_volume(self.profile, "session-1")
+        endpoint = adapter.ensure_gpu_endpoint(self.profile, "session-1", volume)
+        self.assertEqual(self.rest.requests[-1], ("POST", "/serverless", {
+            "name": "runonrunpod-gpu-session-1", "image": "gpu-image@sha256:def",
+            "type": "QUEUE", "gpu": {"pools": ["ADA_24", "AMPERE_80"], "count": 1},
+            "disk": 80, "dataCenterIds": ["dc-1"], "networkVolumes": ["vol-1"],
+            "workers": {"min": 0, "max": 1, "idleTimeout": 7},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4},
+            "timeout": 900_000, "env": {},
+        }))
+        self.assertEqual(endpoint["compute_type"], "GPU")
+        self.assertEqual(endpoint["volume_id"], "vol-1")
+
     def test_rejects_conflicting_configured_volume_binding(self):
         profile = ManagedProfile(
             "profile-1", "dc-1", 100, "cpu-image@sha256:abc", cpu_template_id="template-cpu",
@@ -181,13 +206,15 @@ class RunPodAdapterTests(unittest.TestCase):
         })
         service = SessionLifecycleService(coordinator, self.adapter())
         service.start("recipe-1", self.profile, session_id="session-1")
+        service.ensure_gpu_endpoint("session-1", self.profile)
         self.rest.requests.clear()
 
         recovered = service.recover("session-1", self.profile)
-        self.assertEqual(recovered["state"], "preparing")
+        self.assertEqual(recovered["state"], "ready")
         self.assertFalse(any(request[0] == "POST" for request in self.rest.requests))
         self.assertEqual([request[:2] for request in self.rest.requests], [
             ("GET", "/network-volumes"), ("GET", "/serverless/cpu-1"),
+            ("GET", "/serverless/gpu-2"),
         ])
 
         closed = service.end("session-1")
@@ -201,6 +228,13 @@ class RunPodAdapterTests(unittest.TestCase):
         volume = adapter.ensure_volume(self.profile, "session-1")
         with self.assertRaisesRegex(RunPodAdapterError, "compute/volume binding"):
             adapter.ensure_cpu_endpoint(self.profile, "session-1", volume)
+
+    def test_rejects_invalid_gpu_response(self):
+        self.rest.bad_endpoint = True
+        adapter = self.adapter()
+        volume = adapter.ensure_volume(self.profile, "session-1")
+        with self.assertRaisesRegex(RunPodAdapterError, "compute/volume binding"):
+            adapter.ensure_gpu_endpoint(self.profile, "session-1", volume)
 
     def test_rejects_cpu_endpoint_without_the_explicit_v2_cpu_configuration(self):
         profile = ManagedProfile(

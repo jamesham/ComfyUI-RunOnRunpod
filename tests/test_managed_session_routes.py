@@ -46,6 +46,10 @@ class ManagedSessionRouteTests(unittest.IsolatedAsyncioTestCase):
             coordinator=self.coordinator,
             start=Mock(return_value=session()),
             recover=Mock(return_value=session()),
+            ensure_gpu_endpoint=Mock(return_value={
+                **session(),
+                "bindings": {**session()["bindings"], "gpu_endpoint_id": "gpu-1"},
+            }),
             end=Mock(return_value=session("closed")),
         )
         self.settings = {
@@ -103,6 +107,38 @@ class ManagedSessionRouteTests(unittest.IsolatedAsyncioTestCase):
         }))
         self.assertIn("active", result["error"])
         self.service.end.assert_not_called()
+
+    async def test_gpu_endpoint_is_provisioned_from_server_policy_after_cpu_staging(self):
+        self.coordinator.get_session.return_value = session("ready")
+        operation = SimpleNamespace(session_id="session-1", volume_binding="volume-1")
+        with patch.object(
+            self.routes, "_managed_lifecycle_for_settings",
+            return_value=(self.service, self.profile, "recipe-1"),
+        ), patch.object(self.routes.asyncio, "to_thread", new=inline_to_thread):
+            endpoint_id = await self.routes._ensure_managed_gpu_endpoint(
+                {**self.settings, "managedSessionId": "session-1"}, operation,
+            )
+
+        self.service.ensure_gpu_endpoint.assert_called_once_with("session-1", self.profile)
+        self.assertEqual(endpoint_id, "gpu-1")
+
+    def test_cpu_mode_uses_durable_gpu_binding_instead_of_browser_endpoint(self):
+        managed = {
+            **session("ready"),
+            "bindings": {**session()["bindings"], "gpu_endpoint_id": "managed-gpu"},
+        }
+        self.coordinator.get_session.return_value = managed
+        with patch.object(
+            self.routes, "managed_configuration_from_environment",
+            return_value=(self.coordinator, self.profile, "recipe-1"),
+        ):
+            endpoint_id = self.routes._endpoint_id_for_settings({
+                **self.settings,
+                "managedSessionId": "session-1",
+                "endpointId": "browser-controlled-gpu",
+            })
+
+        self.assertEqual(endpoint_id, "managed-gpu")
 
     async def test_end_requires_explicit_output_acknowledgement(self):
         result = await self.routes.end_managed_session(Request({

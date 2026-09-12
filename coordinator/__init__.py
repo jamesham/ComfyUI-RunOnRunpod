@@ -9,6 +9,7 @@ from .managed_sessions import (
     lifecycle_from_environment,
     lifecycle_from_request,
     managed_recipe_from_environment,
+    validate_v2_gpu_profile,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "SessionCoordinator", "SessionLifecycleService", "lifecycle_from_environment",
     "lifecycle_from_request", "managed_configuration_from_environment",
     "managed_recipe_from_environment",
+    "validate_v2_gpu_profile",
 ]

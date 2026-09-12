@@ -26,7 +26,13 @@ class FakeProvider:
     def ensure_cpu_endpoint(self, profile, session_id, volume):
         self.calls.append(("ensure_cpu", session_id, volume["id"]))
         return self.resources.setdefault(("cpu_endpoint", session_id), {
-            "id": f"cpu-{session_id}", "owner": session_id,
+            "id": f"cpu-{session_id}", "owner": session_id, "volume_id": volume["id"],
+        })
+
+    def ensure_gpu_endpoint(self, profile, session_id, volume):
+        self.calls.append(("ensure_gpu", session_id, volume["id"]))
+        return self.resources.setdefault(("gpu_endpoint", session_id), {
+            "id": f"gpu-{session_id}", "owner": session_id, "volume_id": volume["id"],
         })
 
     def get_resource(self, resource, resource_id):
@@ -51,7 +57,10 @@ class LifecycleTests(unittest.TestCase):
         self.coordinator = SessionCoordinator(self.directory.name)
         self.provider = FakeProvider()
         self.service = SessionLifecycleService(self.coordinator, self.provider)
-        self.profile = ManagedProfile("profile-1", "dc-1", 100, "cpu-image@sha256:abc")
+        self.profile = ManagedProfile(
+            "profile-1", "dc-1", 100, "cpu-image@sha256:abc",
+            gpu_image="gpu-image@sha256:def", gpu_pool_ids=("ADA_24",),
+        )
         plan = compile_model_resource_plan({
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
         }, {"CheckpointLoaderSimple": ("ckpt_name", "checkpoints")})
@@ -75,10 +84,16 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(recovered["bindings"]["volume_id"], "volume-session-1")
         self.assertEqual(self.provider.calls.count(("ensure_volume", "session-1")), 1)
 
+        gpu_ready = self.service.ensure_gpu_endpoint("session-1", self.profile)
+        self.assertEqual(gpu_ready["bindings"]["gpu_endpoint_id"], "gpu-session-1")
+        reconciled_gpu = self.service.ensure_gpu_endpoint("session-1", self.profile)
+        self.assertEqual(reconciled_gpu["bindings"]["gpu_endpoint_id"], "gpu-session-1")
+        self.assertEqual(self.provider.calls.count(("ensure_gpu", "session-1", "volume-session-1")), 1)
+
         closed = self.service.end("session-1")
         self.assertEqual(closed["state"], "closed")
         deletes = [call for call in self.provider.calls if call[0] == "delete"]
-        self.assertEqual([call[1] for call in deletes], ["cpu_endpoint", "volume"])
+        self.assertEqual([call[1] for call in deletes], ["gpu_endpoint", "cpu_endpoint", "volume"])
         self.assertEqual(self.provider.resources, {})
 
     def test_failed_provisioning_is_persisted_as_recoverable(self):
@@ -96,6 +111,33 @@ class LifecycleTests(unittest.TestCase):
                 "profile_version": 1, "profile_id": "p", "data_center": "dc",
                 "volume": {"size_gb": 10},
                 "cpu": {"image": "cpu", "min_workers": 1, "max_workers": 1},
+            })
+
+    def test_profile_parses_managed_gpu_policy_without_changing_schema_version(self):
+        profile = ManagedProfile.from_dict({
+            "profile_version": 1, "profile_id": "p", "data_center": "dc",
+            "volume": {"size_gb": 10},
+            "cpu": {"image": "cpu", "min_workers": 0, "max_workers": 1},
+            "gpu": {
+                "image": "gpu@sha256:def", "pool_ids": ["ADA_24", "AMPERE_80"],
+                "count": 1, "disk_gb": 80, "min_workers": 0, "max_workers": 1,
+                "idle_timeout_seconds": 7, "execution_timeout_ms": 900_000,
+                "environment": {"SAFE_SETTING": "value"},
+            },
+        })
+        self.assertEqual(profile.gpu_pool_ids, ("ADA_24", "AMPERE_80"))
+        self.assertEqual(profile.to_dict()["gpu"]["disk_gb"], 80)
+        self.assertEqual(profile.to_dict()["profile_version"], 1)
+
+    def test_cpu_mode_gpu_profile_rejects_provider_credentials(self):
+        with self.assertRaisesRegex(LifecycleError, "model-provider credentials"):
+            ManagedProfile.from_dict({
+                "profile_version": 1, "profile_id": "p", "data_center": "dc",
+                "volume": {"size_gb": 10}, "cpu": {"image": "cpu"},
+                "gpu": {
+                    "image": "gpu", "pool_ids": ["ADA_24"],
+                    "environment": {"HF_TOKEN": "{{ RUNPOD_SECRET_hf }}"},
+                },
             })
 
 

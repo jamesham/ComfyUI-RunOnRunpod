@@ -53,6 +53,10 @@ class ManagedSessionTests(unittest.TestCase):
                 "image": "cpu@sha256:abc", "template_id": "cpu-template",
                 "flavor_ids": ["cpu3c"], "vcpu_count": 4,
             },
+            "gpu": {
+                "image": "gpu@sha256:def", "pool_ids": ["ADA_24"],
+                "disk_gb": 50,
+            },
         }), encoding="utf-8")
         self.environment = {
             ROOT_ENV: self.directory.name, API_KEY_ENV: "server-only-key",
@@ -152,6 +156,16 @@ class ManagedSessionTests(unittest.TestCase):
         }), encoding="utf-8")
         with self.assertRaisesRegex(ManagedSessionConfigError, "power of two"):
             lifecycle_from_environment(self.environment, transport=lambda *_: (500, None))
+
+    def test_web_configuration_requires_managed_gpu_creation_policy(self):
+        value = json.loads(self.profile_path.read_text(encoding="utf-8"))
+        value.pop("gpu")
+        self.profile_path.write_text(json.dumps(value), encoding="utf-8")
+        coordinator = SessionCoordinator(self.directory.name)
+        coordinator.save_recipe("recipe-1", compile_model_resource_plan({}, {}), {})
+        environment = dict(self.environment, **{RECIPE_ENV: "recipe-1"})
+        with self.assertRaisesRegex(ManagedSessionConfigError, "image and pool_ids"):
+            managed_configuration_from_environment(environment)
 
 
 if __name__ == "__main__":  # pragma: no cover

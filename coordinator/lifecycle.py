@@ -18,6 +18,11 @@ from .session_store import CoordinatorError, SessionCoordinator
 
 PROFILE_VERSION = 1
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_GPU_PROVIDER_CREDENTIALS = {
+    "CIVITAI_API_KEY",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+}
 
 
 class LifecycleError(RuntimeError):
@@ -37,6 +42,12 @@ class ManagedProfile:
     idle_timeout_seconds: int = 5
     execution_timeout_ms: int = 3_600_000
     cpu_environment: tuple[tuple[str, str], ...] = ()
+    gpu_pool_ids: tuple[str, ...] = ()
+    gpu_count: int = 1
+    gpu_disk_gb: int = 50
+    gpu_idle_timeout_seconds: int = 5
+    gpu_execution_timeout_ms: int = 3_600_000
+    gpu_environment: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> "ManagedProfile":
@@ -58,10 +69,48 @@ class ManagedProfile:
         if cpu.get("min_workers", 0) != 0 or cpu.get("max_workers", 1) != 1:
             raise LifecycleError("CPU profile must use min_workers=0 and max_workers=1")
         gpu_image = None
+        gpu_pool_ids: tuple[str, ...] = ()
+        gpu_count = 1
+        gpu_disk_gb = 50
+        gpu_idle_timeout = 5
+        gpu_execution_timeout = 3_600_000
+        gpu_environment: tuple[tuple[str, str], ...] = ()
         if gpu is not None:
             if not isinstance(gpu, Mapping) or not isinstance(gpu.get("image"), str) or not gpu["image"]:
                 raise LifecycleError("managed GPU profile requires gpu.image")
             gpu_image = gpu["image"]
+            if gpu.get("min_workers", 0) != 0 or gpu.get("max_workers", 1) != 1:
+                raise LifecycleError("GPU profile must use min_workers=0 and max_workers=1")
+            pools = gpu.get("pool_ids", [])
+            if not isinstance(pools, list) or not all(isinstance(item, str) and item for item in pools):
+                raise LifecycleError("gpu.pool_ids must be a list of non-empty strings")
+            gpu_pool_ids = tuple(pools)
+            gpu_count = gpu.get("count", 1)
+            gpu_disk_gb = gpu.get("disk_gb", 50)
+            gpu_idle_timeout = gpu.get("idle_timeout_seconds", 5)
+            gpu_execution_timeout = gpu.get("execution_timeout_ms", 3_600_000)
+            if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
+                raise LifecycleError("gpu.count must be a positive integer")
+            if isinstance(gpu_disk_gb, bool) or not isinstance(gpu_disk_gb, int) or gpu_disk_gb < 1:
+                raise LifecycleError("gpu.disk_gb must be a positive integer")
+            if isinstance(gpu_idle_timeout, bool) or not isinstance(gpu_idle_timeout, int) or gpu_idle_timeout < 0:
+                raise LifecycleError("gpu.idle_timeout_seconds must be non-negative")
+            if isinstance(gpu_execution_timeout, bool) or not isinstance(gpu_execution_timeout, int) or gpu_execution_timeout < 1:
+                raise LifecycleError("gpu.execution_timeout_ms must be positive")
+            configured_gpu_environment = gpu.get("environment", {})
+            if not isinstance(configured_gpu_environment, Mapping) or not all(
+                isinstance(name, str) and _ENVIRONMENT_NAME.fullmatch(name)
+                and isinstance(content, str) and content
+                for name, content in configured_gpu_environment.items()
+            ):
+                raise LifecycleError("gpu.environment must map environment names to non-empty strings")
+            forbidden = sorted(_GPU_PROVIDER_CREDENTIALS.intersection(configured_gpu_environment))
+            if forbidden:
+                raise LifecycleError(
+                    "CPU-mode GPU environment must not contain model-provider credentials: "
+                    + ", ".join(forbidden)
+                )
+            gpu_environment = tuple(sorted(configured_gpu_environment.items()))
         template_id = cpu.get("template_id")
         if template_id is not None and (not isinstance(template_id, str) or not template_id):
             raise LifecycleError("cpu.template_id must be a non-empty string")
@@ -87,7 +136,8 @@ class ManagedProfile:
         return cls(
             profile_id, data_center, volume["size_gb"], cpu["image"], gpu_image,
             template_id, tuple(flavors), vcpu_count, idle_timeout, execution_timeout,
-            tuple(sorted(environment.items())),
+            tuple(sorted(environment.items())), gpu_pool_ids, gpu_count, gpu_disk_gb,
+            gpu_idle_timeout, gpu_execution_timeout, gpu_environment,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -104,7 +154,14 @@ class ManagedProfile:
             },
         }
         if self.gpu_image:
-            value["gpu"] = {"image": self.gpu_image, "min_workers": 0, "max_workers": 1}
+            value["gpu"] = {
+                "image": self.gpu_image, "pool_ids": list(self.gpu_pool_ids),
+                "count": self.gpu_count, "disk_gb": self.gpu_disk_gb,
+                "min_workers": 0, "max_workers": 1,
+                "idle_timeout_seconds": self.gpu_idle_timeout_seconds,
+                "execution_timeout_ms": self.gpu_execution_timeout_ms,
+                "environment": dict(self.gpu_environment),
+            }
         return value
 
 
@@ -113,6 +170,7 @@ class LifecycleProvider(Protocol):
 
     def ensure_volume(self, profile: ManagedProfile, session_id: str) -> Mapping[str, object]: ...
     def ensure_cpu_endpoint(self, profile: ManagedProfile, session_id: str, volume: Mapping[str, object]) -> Mapping[str, object]: ...
+    def ensure_gpu_endpoint(self, profile: ManagedProfile, session_id: str, volume: Mapping[str, object]) -> Mapping[str, object]: ...
     def get_resource(self, resource: str, resource_id: str) -> Mapping[str, object] | None: ...
     def delete_resource(self, resource: str, resource_id: str) -> None: ...
 
@@ -167,7 +225,7 @@ class SessionLifecycleService:
             # responses do not carry coordinator-private provenance markers.
             result["ownership"] = dict(ownership)
 
-        if resource == "cpu_endpoint" and isinstance(recorded.get("volume_id"), str):
+        if resource in {"cpu_endpoint", "gpu_endpoint"} and isinstance(recorded.get("volume_id"), str):
             expected_volume = recorded["volume_id"]
             volumes = result.get("networkVolumes", result.get("networkVolumeIds"))
             attached = result.get("networkVolumeId") == expected_volume or (
@@ -175,7 +233,7 @@ class SessionLifecycleService:
             )
             if any(key in result for key in ("networkVolumeId", "networkVolumeIds", "networkVolumes")):
                 if not attached:
-                    raise LifecycleError("provider CPU endpoint no longer has the recorded volume")
+                    raise LifecycleError(f"provider {resource} no longer has the recorded volume")
             result["volume_id"] = expected_volume
         return result
 
@@ -255,10 +313,51 @@ class SessionLifecycleService:
             session_id, "cpu_endpoint",
             lambda: self.provider.ensure_cpu_endpoint(profile, session_id, volume),
         )
-        return self.coordinator.record_lifecycle_operation(
+        recovered = self.coordinator.record_lifecycle_operation(
             session_id, self._operation_id(session_id, cpu_action, "cpu_endpoint"),
-            action=cpu_action, resource="cpu_endpoint", state="succeeded", result=cpu, session_state="preparing",
+            action=cpu_action, resource="cpu_endpoint", state="succeeded", result=cpu,
+            session_state="ready" if session.get("state") == "ready" else "preparing",
         )
+        # Recovery never creates a GPU endpoint before staging, but once the
+        # session owns one it must reconcile that exact endpoint too.
+        if (
+            isinstance(existing_resources, Mapping)
+            and isinstance(existing_resources.get("gpu_endpoint"), Mapping)
+        ):
+            _gpu, recovered = self._recover_resource(
+                session_id, "gpu_endpoint",
+                lambda: self.provider.ensure_gpu_endpoint(profile, session_id, volume),
+            )
+        return recovered
+
+    def ensure_gpu_endpoint(self, session_id: str, profile: ManagedProfile) -> dict[str, object]:
+        """Create or reconcile the session GPU endpoint after CPU staging.
+
+        Start/recover intentionally stop after the CPU endpoint. Calling this
+        method is the explicit readiness boundary that keeps GPU provisioning
+        behind successful CPU artifact preparation.
+        """
+        with self.coordinator.lifecycle_lock(session_id):
+            session = self.coordinator.get_session(session_id)
+            if session.get("state") in {"closed", "closing"}:
+                raise LifecycleError(f"cannot provision GPU endpoint while {session.get('state')}")
+            resources = session.get("resources")
+            recorded_volume = resources.get("volume") if isinstance(resources, Mapping) else None
+            if not isinstance(recorded_volume, Mapping):
+                raise LifecycleError("managed session has no recorded volume")
+            volume = self._recorded_resource("volume", recorded_volume)
+            if volume is None:
+                raise LifecycleError("recorded volume is missing; manual reconciliation required")
+            gpu_action = "reconcile" if isinstance(resources.get("gpu_endpoint"), Mapping) else "create"
+            gpu, _updated = self._recover_resource(
+                session_id, "gpu_endpoint",
+                lambda: self.provider.ensure_gpu_endpoint(profile, session_id, volume),
+            )
+            return self.coordinator.record_lifecycle_operation(
+                session_id, self._operation_id(session_id, gpu_action, "gpu_endpoint"),
+                action=gpu_action, resource="gpu_endpoint", state="succeeded", result=gpu,
+                session_state="ready",
+            )
 
     def end(self, session_id: str) -> dict[str, object]:
         """Persist closure intent and delete exact recorded resources in order."""
