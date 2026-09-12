@@ -17,12 +17,17 @@ receipt is written to the volume, so existing unverified model objects will be
 restaged. **Model staging mode** defaults to *GPU only (compatible)*, retaining
 the existing worker fetch path. *CPU managed staging* is an explicit opt-in and
 requires its separately configured coordinator and CPU endpoint; it never falls
-back to GPU downloads.
+back to GPU downloads. In CPU mode, model/input installation and output
+retrieval use signed, bounded HTTPS jobs against the CPU endpoint, so the
+selected session does not require RunPod S3 credentials. The current browser
+integration fails closed until an active managed session supplies the CPU
+endpoint and volume binding.
 
-The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image
-and signed staging contract for the future CPU Serverless endpoint. It is not
-deployed or enabled by default; ordinary submissions keep their current GPU
-worker behavior until a session coordinator provides a matching signed request.
+The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image,
+signed model-staging contract, and signed artifact-transfer contract for the CPU
+Serverless endpoint. It is not deployed or enabled by default; ordinary
+submissions keep their current GPU worker behavior until a session coordinator
+provides a matching signed request.
 
 `coordinator/` provides the local durable record core for recipes and managed
 sessions, plus a guarded RunPod REST lifecycle adapter. The adapter targets

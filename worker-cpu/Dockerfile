@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir runpod requests
 # Build with the repository root as context:
 # docker build -f worker-cpu/Dockerfile -t runonrunpod-cpu-stager .
 COPY cpu_staging_contract.py /app/cpu_staging_contract.py
+COPY cpu_artifact_contract.py /app/cpu_artifact_contract.py
 COPY resource_plan.py /app/resource_plan.py
 COPY worker-cpu/handler.py /app/handler.py
 

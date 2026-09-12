@@ -1,9 +1,11 @@
 # CPU stager image
 
-This is a CPU-only RunPod Serverless image. It receives a coordinator-signed
-staging envelope, verifies its HMAC and deployment volume binding, downloads
-only declared HTTPS model sources, verifies SHA-256 and byte size, and publishes
-each file atomically into the mounted volume.
+This is a CPU-only RunPod Serverless image. It receives coordinator-signed
+staging and artifact envelopes, verifies their HMAC and deployment volume
+binding, downloads only declared HTTPS model sources, and publishes each file
+atomically into the mounted volume. Artifact envelopes also support bounded
+HTTPS chunks for local-model fallback, workflow inputs, output retrieval, and
+per-job cleanup; these operations do not use RunPod S3.
 
 Required deployment configuration:
 
@@ -24,4 +26,7 @@ docker build -f worker-cpu/Dockerfile -t runonrunpod-cpu-stager .
 ```
 
 No CPU endpoint is deployed or enabled by default. The local plugin will use
-this image only with a coordinator-provided signed request.
+this image only with a coordinator-provided signed request. CPU-managed
+artifact transfer requires a managed session so the coordinator can authorize
+the endpoint, volume binding, and HMAC key; a static browser-supplied endpoint
+configuration fails closed.

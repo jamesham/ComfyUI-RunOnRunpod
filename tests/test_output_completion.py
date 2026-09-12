@@ -159,6 +159,29 @@ class OutputCompletionTests(unittest.IsolatedAsyncioTestCase):
             self.settings, ["job/a.png"], self.inputs,
         ), ["job/a.png"])
 
+    async def test_cpu_retrieval_uses_signed_artifacts_without_s3(self):
+        operation = SimpleNamespace(
+            endpoint_id="cpu-endpoint", volume_binding="volume-1", signing_key="hmac",
+        )
+        settings = {
+            "apiKey": "test-only", "endpointId": "gpu-endpoint", "stagingMode": "cpu",
+            "managedSessionId": "session-1", "deleteInputsAfterJob": True,
+            "deleteOutputsAfterJob": True,
+        }
+        with patch.object(self.routes, "_managed_cpu_artifact_operation", return_value=operation), \
+             patch.object(self.routes, "download_cpu_artifact", new=AsyncMock()) as download, \
+             patch.object(self.routes, "delete_cpu_artifact", new=AsyncMock()) as delete:
+            files = await self.routes._download_and_cleanup_cpu(
+                settings, ["job/a.png"], {"input.png": "inputs/input"},
+            )
+        self.assertEqual(files, ["job/a.png"])
+        self.make_client.assert_not_called()
+        self.assertEqual(download.await_args.args[:6], (
+            "cpu-endpoint", "test-only", "hmac", "volume-1",
+            download.await_args.args[4], "outputs/job/a.png",
+        ))
+        self.assertEqual(delete.await_count, 2)
+
     async def poll(self):
         self.routes._active_tasks["job"] = object()
         with patch.object(asyncio, "sleep", new=AsyncMock()):

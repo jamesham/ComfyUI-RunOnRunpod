@@ -163,7 +163,9 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
                 self.settings, "volume", Mock(), self.workflow, metadata, "prep-1",
             )
         fake = Mock()
-        fake.get_session.return_value = {"bindings": {"cpu_endpoint_id": "managed-cpu"}}
+        fake.get_session.return_value = {
+            "bindings": {"cpu_endpoint_id": "managed-cpu", "volume_binding": "volume-1"},
+        }
         fake.authorize_stage.return_value = {"payload": "signed"}
         with patch.object(self.routes, "SessionCoordinator", return_value=fake), \
              patch.dict("os.environ", {
@@ -221,6 +223,60 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             self.routes._cpu_stager_request(
                 dict(self.settings, stagingMode="cpu"), preparation, "prep-1",
             )
+
+    async def test_cpu_submission_prepares_before_any_gpu_or_s3_call(self):
+        settings = dict(
+            self.settings, stagingMode="cpu", managedSessionId="session-1",
+        )
+        for key in ("bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl"):
+            settings.pop(key)
+        operation = SimpleNamespace(
+            endpoint_id="cpu-endpoint", volume_binding="volume-1", signing_key="hmac",
+        )
+        order = []
+
+        async def plan(*_args):
+            order.append("plan")
+            return object()
+
+        async def inputs(*_args):
+            order.append("inputs")
+            return {"image.png": "inputs/image"}
+
+        async def execute(*_args):
+            order.append("stage")
+
+        async def health(*_args):
+            order.append("health")
+
+        async def binding(*_args):
+            order.append("binding")
+
+        async def version(*_args):
+            order.append("version")
+
+        async def nodes(*_args):
+            order.append("nodes")
+
+        async def submit(*_args):
+            order.append("submit")
+            return {"job_id": "job-1"}
+
+        with patch.object(self.routes, "_managed_cpu_artifact_operation", return_value=operation), \
+             patch.object(self.routes, "_plan_cpu_model_preparation", new=plan), \
+             patch.object(self.routes, "_upload_cpu_input_files", new=inputs), \
+             patch.object(self.routes, "_execute_cpu_model_preparation", new=execute), \
+             patch.object(self.routes, "_validate_cpu_gpu_volume", new=binding), \
+             patch.object(self.routes, "_validate_runpod_health", new=health), \
+             patch.object(self.routes, "_fetch_and_check_worker_version", new=version), \
+             patch.object(self.routes, "_check_node_compatibility", new=nodes), \
+             patch.object(self.routes, "_submit_workflow_to_runpod", new=submit), \
+             patch.object(self.routes, "_validate_s3", new=AsyncMock(side_effect=AssertionError("CPU used S3"))):
+            result = await self.routes._do_submit({
+                "settings": settings, "workflow": {}, "prep_id": "prep-1",
+            })
+        self.assertEqual(result, {"job_id": "job-1"})
+        self.assertEqual(order, ["plan", "inputs", "stage", "binding", "health", "version", "nodes", "submit"])
 
     def test_invalid_staging_mode_is_rejected(self):
         with self.assertRaisesRegex(self.routes._SubmitError, "Staging mode"):

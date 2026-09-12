@@ -86,10 +86,24 @@ Hermetic tests cover both executor choices and invalid mode rejection.
 Implemented next: `integration/runpod_cpu_stager_smoke.py` is an explicitly
 opt-in live harness (`--live`) for the CPU path. It uses the coordinator,
 lifecycle adapter, secret-reference endpoint environment mapping, signed request,
-CPU client, and cleanup flow to create one temporary volume/CPU endpoint, stage
-one pinned download, and delete the exact recorded resources. `--pause-after-create`
-allows RunPod-console inspection before staging and cleanup. It is never run by
-ordinary test discovery and has not been run against a live account here.
+CPU client, and cleanup flow to create one temporary volume/CPU endpoint, reject
+one corrupted request, stage one pinned download, and delete the exact recorded
+resources. `--pause-after-create` allows RunPod-console inspection before
+staging and cleanup. It is never run by ordinary test discovery and has not
+been run against a live account here.
+
+Implemented next: CPU-managed submission now has an authenticated, coordinator-
+signed artifact boundary over the RunPod Serverless job API. Bounded chunks can
+install local models and workflow inputs under the session volume, retrieve
+outputs, and perform per-job cleanup without an S3 client, bucket, or S3
+credential. CPU preparation is completed before GPU health/version/node checks;
+the configured GPU endpoint is also checked through the RunPod API for the same
+session-volume binding before inference;
+GPU-only mode retains its existing S3 and GPU preparation order. The browser
+CPU path currently fails closed unless an existing managed session supplies the
+CPU endpoint, volume binding, and server-side signing key; user-facing managed
+session start/end and fresh-session recipe restoration remain the next lifecycle
+integration step.
 
 ## 1. Objective and scope
 

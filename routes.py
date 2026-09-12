@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,12 @@ from .model_readiness import (
     write_receipt,
 )
 from .cpu_stager_client import CpuStagerError, stage_models as stage_models_on_cpu
+from .cpu_artifact_client import (
+    CpuArtifactError,
+    delete_file as delete_cpu_artifact,
+    download_file as download_cpu_artifact,
+    upload_file as upload_cpu_artifact,
+)
 from .cpu_staging_contract import (
     CpuStagingContractError,
     stage_request_from_downloads,
@@ -394,11 +401,14 @@ def _raise_if_cancelled(prep_id: str, stage: str) -> None:
         raise _SubmitError("Cancelled", 499, log=f"Submit cancelled during {stage}")
 
 
-def _validate_settings(settings: dict) -> None:
-    """Ensure the user filled in RunPod + S3 credentials."""
+def _validate_settings(settings: dict, staging_mode: str | None = None) -> None:
+    """Validate only the credentials used by the selected staging mode."""
     if not settings.get("apiKey") or not settings.get("endpointId"):
         raise _SubmitError("RunPod API Key and Endpoint ID are required")
-    if not all(settings.get(k) for k in ("bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl")):
+    mode = staging_mode or _staging_mode(settings)
+    if mode == STAGING_MODE_GPU and not all(
+        settings.get(k) for k in ("bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl")
+    ):
         raise _SubmitError("S3 credentials, endpoint URL, and bucket name are required")
 
 
@@ -431,6 +441,44 @@ async def _validate_runpod_health(endpoint_id: str, api_key: str) -> None:
         raise
     except Exception as e:
         raise _SubmitError(f"RunPod API error: {e}", log=f"RunPod API health check error: {e}")
+
+
+async def _validate_cpu_gpu_volume(endpoint_id: str, api_key: str, volume_binding: str) -> None:
+    """Require the inference endpoint to mount the exact CPU session volume."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.runpod.io/v2/serverless/{endpoint_id}",
+                headers={"Authorization": f"Bearer {api_key}", "User-Agent": "ComfyUI-RunOnRunpod"},
+            ) as response:
+                if response.status != 200:
+                    raise _SubmitError(
+                        f"RunPod GPU endpoint lookup failed (status {response.status})",
+                        log=f"RunPod GPU endpoint lookup failed: {response.status}",
+                    )
+                value = await response.json()
+    except _SubmitError:
+        raise
+    except Exception as error:
+        raise _SubmitError(
+            f"RunPod GPU endpoint lookup failed: {error}",
+            log=f"RunPod GPU endpoint lookup error: {error}",
+        ) from None
+    if not isinstance(value, dict):
+        raise _SubmitError("RunPod GPU endpoint lookup returned invalid data")
+    attached = value.get("networkVolumeId") == volume_binding
+    volumes = value.get("networkVolumes", value.get("networkVolumeIds"))
+    if isinstance(volumes, list):
+        attached = attached or any(
+            item == volume_binding
+            or (isinstance(item, dict) and item.get("id") == volume_binding)
+            for item in volumes
+        )
+    if not attached:
+        raise _SubmitError(
+            "GPU endpoint is not attached to the managed CPU session volume",
+            log=f"GPU endpoint {endpoint_id} does not mount volume {volume_binding}",
+        )
 
 
 async def _validate_s3(settings: dict, bucket: str):
@@ -686,6 +734,47 @@ class _CpuStagerOperation:
     session_id: str | None = None
 
 
+@dataclass(frozen=True)
+class _CpuArtifactOperation:
+    """Server-only authority for CPU-volume artifact transfer."""
+
+    endpoint_id: str
+    volume_binding: str
+    signing_key: str
+    coordinator: SessionCoordinator
+    session_id: str
+
+
+def _managed_cpu_artifact_operation(settings: dict) -> _CpuArtifactOperation:
+    """Resolve a CPU session without accepting signing material from UI data."""
+    managed_session_id = settings.get("managedSessionId")
+    state_root = os.environ.get("RUNONRUNPOD_COORDINATOR_ROOT")
+    signing_key = os.environ.get("RUNONRUNPOD_CPU_STAGING_SIGNING_KEY")
+    if not isinstance(managed_session_id, str) or not managed_session_id:
+        raise _SubmitError("CPU managed staging requires an active managed session")
+    if not state_root or not signing_key:
+        raise _SubmitError(
+            "Managed CPU staging is not configured on this ComfyUI server",
+            log="managed CPU staging needs RUNONRUNPOD_COORDINATOR_ROOT and signing key",
+        )
+    coordinator = SessionCoordinator(state_root)
+    try:
+        session = coordinator.get_session(managed_session_id)
+    except CoordinatorError as error:
+        raise _SubmitError(
+            f"Managed CPU staging could not be authorized: {error}",
+            log=f"managed CPU coordinator: {error}",
+        ) from None
+    bindings = session.get("bindings")
+    endpoint_id = bindings.get("cpu_endpoint_id") if isinstance(bindings, dict) else None
+    volume_binding = bindings.get("volume_binding") if isinstance(bindings, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id:
+        raise _SubmitError("Managed session has no CPU staging endpoint")
+    if not isinstance(volume_binding, str) or not volume_binding:
+        raise _SubmitError("Managed session has no CPU volume binding")
+    return _CpuArtifactOperation(endpoint_id, volume_binding, signing_key, coordinator, managed_session_id)
+
+
 def _cpu_stager_request(
     settings: dict,
     preparation: "_ModelPreparation",
@@ -700,31 +789,20 @@ def _cpu_stager_request(
     if _staging_mode(settings) == STAGING_MODE_GPU:
         return None
 
-    managed_session_id = settings.get("managedSessionId")
-    if managed_session_id:
-        state_root = os.environ.get("RUNONRUNPOD_COORDINATOR_ROOT")
-        signing_key = os.environ.get("RUNONRUNPOD_CPU_STAGING_SIGNING_KEY")
-        if not state_root or not signing_key:
-            raise _SubmitError(
-                "Managed CPU staging is not configured on this ComfyUI server",
-                log="managed CPU staging needs RUNONRUNPOD_COORDINATOR_ROOT and signing key",
-            )
-        coordinator = SessionCoordinator(state_root)
+    if settings.get("managedSessionId"):
+        managed = _managed_cpu_artifact_operation(settings)
         try:
-            session = coordinator.get_session(managed_session_id)
-            bindings = session.get("bindings")
-            endpoint_id = bindings.get("cpu_endpoint_id") if isinstance(bindings, dict) else None
-            envelope = coordinator.authorize_stage(
-                managed_session_id, prep_id, preparation.worker_downloads, signing_key,
+            envelope = managed.coordinator.authorize_stage(
+                managed.session_id, prep_id, preparation.worker_downloads, managed.signing_key,
             )
         except CoordinatorError as error:
             raise _SubmitError(
                 f"Managed CPU staging could not be authorized: {error}",
                 log=f"managed CPU coordinator: {error}",
             ) from None
-        if not isinstance(endpoint_id, str) or not endpoint_id:
-            raise _SubmitError("Managed session has no CPU staging endpoint")
-        return _CpuStagerOperation(endpoint_id, envelope, coordinator, managed_session_id)
+        return _CpuStagerOperation(
+            managed.endpoint_id, envelope, managed.coordinator, managed.session_id,
+        )
 
     endpoint_id = settings.get("cpuStagerEndpointId")
     envelope = settings.get("cpuStagerSignedRequest")
@@ -941,6 +1019,160 @@ async def _plan_model_preparation(
     )
 
 
+async def _plan_cpu_model_preparation(
+    settings: dict,
+    workflow: dict,
+    workflow_models_by_name: dict[str, dict],
+    prep_id: str,
+) -> _ModelPreparation:
+    """Plan CPU-mode content without opening an S3 client or checking a bucket."""
+    try:
+        resource_plan = compile_model_resource_plan(workflow, MODEL_NODE_FIELDS)
+    except ResourcePlanError as error:
+        raise _SubmitError(
+            "Workflow contains an unsafe or ambiguous model reference",
+            log=f"resource plan rejected workflow: {error}",
+        ) from None
+    requirements = resource_plan.requirements
+    if not requirements:
+        return _ModelPreparation((), [], [], {}, {}, [], {})
+    if not settings.get("uploadMissingModels", True):
+        raise _SubmitError(
+            "CPU managed staging requires verified model preparation to remain enabled",
+            log="CPU mode cannot trust an S3 readiness receipt or bypass its CPU preparation barrier",
+        )
+    missing = []
+    for requirement in requirements:
+        _raise_if_cancelled(prep_id, "CPU model scan")
+        missing.append((requirement, _find_model_file(requirement.subdir, requirement.filename)))
+    worker_downloads, upload_queue, worker_fallbacks, materialized, unresolved = await _resolve_model_sources(
+        missing, workflow_models_by_name, settings, prep_id,
+    )
+    if unresolved:
+        targets = ", ".join(unresolved)
+        raise _SubmitError(
+            f"Required model files have no local copy or usable source: {targets}",
+            log=f"unresolved CPU model targets: {targets}",
+        )
+    planned_order, model_status = _build_model_status(worker_downloads, upload_queue)
+    _make_progress_emitter(prep_id, planned_order, model_status)("CPU model preparation planned")
+    return _ModelPreparation(
+        requirements, worker_downloads, upload_queue, worker_fallbacks, materialized,
+        planned_order, model_status,
+    )
+
+
+def _artifact_operation_id(prep_id: str, label: str, target_path: str) -> str:
+    """Derive a compact serverless-safe ID without leaking local path text."""
+    digest = hashlib.sha256(f"{prep_id}\0{label}\0{target_path}".encode("utf-8")).hexdigest()[:32]
+    return f"{label}-{digest}"
+
+
+async def _upload_cpu_input_files(
+    settings: dict,
+    workflow: dict,
+    prep_id: str,
+    operation: _CpuArtifactOperation,
+) -> dict[str, str]:
+    """Install workflow inputs through the CPU endpoint rather than S3."""
+    input_files: dict[str, str] = {}
+    input_dir = _get_input_directory()
+    for filename in _scan_input_files(workflow):
+        _raise_if_cancelled(prep_id, "CPU input upload")
+        source_path = os.path.join(input_dir, filename)
+        if not os.path.isfile(source_path):
+            raise _SubmitError(f"Input file not found: {filename}")
+        target_path = f"inputs/{hashlib.sha256(filename.encode('utf-8')).hexdigest()}"
+        _send_event("progress", {"prep_id": prep_id, "message": f"Installing input: {filename}"})
+        try:
+            await upload_cpu_artifact(
+                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.volume_binding, _artifact_operation_id(prep_id, "input", target_path),
+                target_path, source_path,
+            )
+        except CpuArtifactError as error:
+            raise _SubmitError(
+                f"CPU input installation failed: {error}", log=f"CPU input artifact: {error}",
+            ) from None
+        input_files[filename] = target_path
+    return input_files
+
+
+async def _execute_cpu_model_preparation(
+    preparation: _ModelPreparation,
+    settings: dict,
+    prep_id: str,
+    operation: _CpuArtifactOperation,
+) -> None:
+    """Stage remote and local models through the CPU endpoint, never S3."""
+    emit_progress = _make_progress_emitter(
+        prep_id, preparation.planned_order, preparation.model_status,
+    )
+    if preparation.worker_downloads:
+        cpu_stage = _cpu_stager_request(settings, preparation, prep_id)
+        if cpu_stage is None:
+            raise _SubmitError("CPU managed staging was not selected")
+
+        def _on_cpu_progress(output: dict) -> None:
+            for result in output.get("results") or []:
+                if not isinstance(result, dict):
+                    continue
+                filename = os.path.basename(result.get("target_path") or "")
+                if filename:
+                    preparation.model_status[filename] = {
+                        "filename": filename, "status": result.get("status", "downloading"),
+                    }
+            emit_progress("CPU staging models")
+
+        try:
+            result = await stage_models_on_cpu(
+                cpu_stage.endpoint_id, settings["apiKey"], cpu_stage.signed_request, _on_cpu_progress,
+            )
+        except (CpuStagerError, CoordinatorError) as error:
+            raise _SubmitError(f"CPU model staging failed: {error}", log=f"CPU stager: {error}") from None
+        for model in result["results"]:
+            filename = os.path.basename(model["target_path"])
+            preparation.model_status[filename] = {"filename": filename, "status": "done"}
+        emit_progress("CPU staging models")
+
+    for subdir, filename, source_path in preparation.upload_queue:
+        _raise_if_cancelled(prep_id, "CPU local-model installation")
+        target_path = f"models/{subdir}/{filename}"
+        _send_event("progress", {"prep_id": prep_id, "message": f"Installing model: {filename}"})
+        try:
+            result = await upload_cpu_artifact(
+                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.volume_binding, _artifact_operation_id(prep_id, "model", target_path),
+                target_path, source_path,
+            )
+        except CpuArtifactError as error:
+            raise _SubmitError(
+                f"CPU local-model installation failed: {error}", log=f"CPU model artifact: {error}",
+            ) from None
+        expected = preparation.materialized[target_path].identity
+        if result.get("sha256") != expected.sha256 or result.get("size") != expected.size:
+            raise _SubmitError("CPU local-model installation returned a mismatched identity")
+        preparation.model_status[filename] = {"filename": filename, "status": "done"}
+        emit_progress("CPU staging models")
+
+    # A stage result covers only provider downloads. Do not mark a managed
+    # session ready until the separate signed upload-install contract also has
+    # a durable completion record; leaving it preparing is the safe state for
+    # mixed remote/local content until that ledger is implemented.
+    if preparation.worker_downloads and not preparation.upload_queue:
+        cpu_stage = _cpu_stager_request(settings, preparation, prep_id)
+        if cpu_stage is not None and cpu_stage.coordinator is not None and cpu_stage.session_id is not None:
+            try:
+                await asyncio.to_thread(
+                    cpu_stage.coordinator.record_stage_result, cpu_stage.session_id, prep_id, result,
+                )
+            except CoordinatorError as error:
+                raise _SubmitError(
+                    f"CPU staging completed but managed state could not record readiness: {error}",
+                    log=f"managed CPU coordinator result: {error}",
+                ) from None
+
+
 async def _execute_model_preparation(
     preparation: _ModelPreparation,
     settings: dict,
@@ -1100,33 +1332,52 @@ async def _do_submit(data: dict):
 
     api_key = settings.get("apiKey", "")
     endpoint_id = settings.get("endpointId", "")
-    bucket = settings.get("bucketName", "")
 
     try:
-        _validate_settings(settings)
-        _staging_mode(settings)
+        mode = _staging_mode(settings)
+        _validate_settings(settings, mode)
 
-        _send_event("progress", {"prep_id": prep_id, "message": "Validating credentials..."})
-        await _validate_runpod_health(endpoint_id, api_key)
-        client = await _validate_s3(settings, bucket)
-
-        model_preparation = await _plan_model_preparation(
-            settings, bucket, client, workflow, workflow_models_by_name, prep_id,
-        )
-
-        _send_event("progress", {"prep_id": prep_id, "message": "Waiting for worker..."})
-        await _fetch_and_check_worker_version(endpoint_id, api_key)
-        _raise_if_cancelled(prep_id, "worker ping")
-
-        _send_event("progress", {"prep_id": prep_id, "message": "Checking custom nodes..."})
-        await _check_node_compatibility(endpoint_id, api_key, workflow)
-        _raise_if_cancelled(prep_id, "node check")
-
-        input_files = await _upload_input_files(settings, bucket, workflow, prep_id)
-
-        await _execute_model_preparation(
-            model_preparation, settings, bucket, client, endpoint_id, api_key, prep_id,
-        )
+        if mode == STAGING_MODE_CPU:
+            # CPU mode deliberately completes every content operation before
+            # the GPU endpoint receives even a health or capability request.
+            cpu_operation = _managed_cpu_artifact_operation(settings)
+            _send_event("progress", {"prep_id": prep_id, "message": "Planning CPU staging..."})
+            model_preparation = await _plan_cpu_model_preparation(
+                settings, workflow, workflow_models_by_name, prep_id,
+            )
+            input_files = await _upload_cpu_input_files(settings, workflow, prep_id, cpu_operation)
+            await _execute_cpu_model_preparation(
+                model_preparation, settings, prep_id, cpu_operation,
+            )
+            _raise_if_cancelled(prep_id, "CPU preparation")
+            await _validate_cpu_gpu_volume(endpoint_id, api_key, cpu_operation.volume_binding)
+            _send_event("progress", {"prep_id": prep_id, "message": "Waiting for GPU worker..."})
+            await _validate_runpod_health(endpoint_id, api_key)
+            await _fetch_and_check_worker_version(endpoint_id, api_key)
+            _raise_if_cancelled(prep_id, "GPU worker ping")
+            _send_event("progress", {"prep_id": prep_id, "message": "Checking custom nodes..."})
+            await _check_node_compatibility(endpoint_id, api_key, workflow)
+            _raise_if_cancelled(prep_id, "GPU node check")
+        else:
+            # Preserve the main-branch S3/GPU staging order byte-for-byte in
+            # behavior. CPU mode is the only path permitted to bypass S3.
+            bucket = settings.get("bucketName", "")
+            _send_event("progress", {"prep_id": prep_id, "message": "Validating credentials..."})
+            await _validate_runpod_health(endpoint_id, api_key)
+            client = await _validate_s3(settings, bucket)
+            model_preparation = await _plan_model_preparation(
+                settings, bucket, client, workflow, workflow_models_by_name, prep_id,
+            )
+            _send_event("progress", {"prep_id": prep_id, "message": "Waiting for worker..."})
+            await _fetch_and_check_worker_version(endpoint_id, api_key)
+            _raise_if_cancelled(prep_id, "worker ping")
+            _send_event("progress", {"prep_id": prep_id, "message": "Checking custom nodes..."})
+            await _check_node_compatibility(endpoint_id, api_key, workflow)
+            _raise_if_cancelled(prep_id, "node check")
+            input_files = await _upload_input_files(settings, bucket, workflow, prep_id)
+            await _execute_model_preparation(
+                model_preparation, settings, bucket, client, endpoint_id, api_key, prep_id,
+            )
 
         _send_event("progress", {"prep_id": prep_id, "message": "Submitting to RunPod..."})
         return await _submit_workflow_to_runpod(
@@ -1167,7 +1418,10 @@ async def _poll_and_finish(job_id: str, settings: dict, input_files: dict):
             elif status == "COMPLETED":
                 try:
                     output_files = _completed_output_files(result)
-                    downloaded = await _download_and_cleanup(settings, output_files, input_files)
+                    if _staging_mode(settings) == STAGING_MODE_CPU:
+                        downloaded = await _download_and_cleanup_cpu(settings, output_files, input_files)
+                    else:
+                        downloaded = await _download_and_cleanup(settings, output_files, input_files)
                 except OutputRetrievalError as e:
                     _send_event("failed", {"job_id": job_id, "error": str(e)})
                 else:
@@ -1261,6 +1515,54 @@ async def _download_and_cleanup(settings: dict, output_files: list, input_files:
         except Exception as e:
             print(_PREFIX, f"Failed to delete inputs: {e}")
 
+    return downloaded
+
+
+async def _download_and_cleanup_cpu(settings: dict, output_files: list, input_files: dict):
+    """Retrieve and clean CPU-session artifacts through the signed HTTPS boundary."""
+    try:
+        operation = _managed_cpu_artifact_operation(settings)
+    except _SubmitError as error:
+        raise OutputRetrievalError(
+            f"CPU output retrieval is not configured; remote files were kept: {error.message}",
+        ) from None
+    downloaded: list[str] = []
+    failed: list[str] = []
+    output_dir = _get_output_directory()
+    for rel_path in output_files:
+        try:
+            safe_path = validate_output_path(rel_path)
+            target_path = f"outputs/{safe_path}"
+            destination = local_output_path(output_dir, safe_path)
+            _send_event("progress", {"message": f"Downloading: {os.path.basename(safe_path)}"})
+            await download_cpu_artifact(
+                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.volume_binding, _artifact_operation_id("output", "read", target_path),
+                target_path, destination,
+            )
+            downloaded.append(safe_path)
+        except (CpuArtifactError, OutputRetrievalError, OSError, _SubmitError) as error:
+            print(_PREFIX, f"CPU output retrieval failed for {rel_path}: {error}")
+            failed.append(rel_path)
+    if failed:
+        raise OutputRetrievalError(
+            f"Could not retrieve {len(failed)} of {len(output_files)} output(s); "
+            "remote files were kept on the network volume",
+        )
+
+    targets: list[str] = []
+    if settings.get("deleteOutputsAfterJob", True):
+        targets.extend(f"outputs/{path}" for path in downloaded)
+    if settings.get("deleteInputsAfterJob", False):
+        targets.extend(value for value in input_files.values() if isinstance(value, str))
+    for target_path in targets:
+        try:
+            await delete_cpu_artifact(
+                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.volume_binding, _artifact_operation_id("cleanup", "delete", target_path), target_path,
+            )
+        except CpuArtifactError as error:
+            print(_PREFIX, f"CPU artifact cleanup failed for {target_path}: {error}")
     return downloaded
 
 
@@ -1463,7 +1765,10 @@ async def recover_jobs(request):
                 try:
                     output_files = _completed_output_files(result)
                     # The original input upload context is unavailable.
-                    downloaded = await _download_and_cleanup(settings, output_files, {})
+                    if _staging_mode(settings) == STAGING_MODE_CPU:
+                        downloaded = await _download_and_cleanup_cpu(settings, output_files, {})
+                    else:
+                        downloaded = await _download_and_cleanup(settings, output_files, {})
                 except OutputRetrievalError as e:
                     entry["state"] = "failed"
                     entry["error"] = str(e)
@@ -1573,6 +1878,11 @@ async def clean_storage(request):
     data = await request.json()
     settings = data.get("settings", {})
     folder = data.get("folder", "")
+
+    if _staging_mode(settings) == STAGING_MODE_CPU:
+        return web.json_response({
+            "error": "CPU-managed cleanup is session-scoped; end the managed session to delete its volume",
+        }, status=400)
 
     if folder == "all":
         prefixes = ["inputs/", "outputs/", "models/", READINESS_PREFIX]
