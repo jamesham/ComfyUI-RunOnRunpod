@@ -4,7 +4,24 @@ import contextlib
 import io
 import unittest
 
-from coordinator.datacenter_availability import S3_ENDPOINTS, run, select_data_centers
+from coordinator.datacenter_availability import S3_ENDPOINTS, _fetch_catalog, run, select_data_centers
+
+
+class FakeCatalogResponse:
+    status = 200
+    headers = {"Content-Type": "application/json", "X-Request-ID": "request-1"}
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self.body
 
 
 class DataCenterAvailabilityTests(unittest.TestCase):
@@ -87,6 +104,25 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         )
         self.assertEqual([item.data_center_id for item in results], ["US-CA-2"])
         self.assertEqual(rejected, [])
+
+    def test_http_debug_outputs_catalog_exchange_without_bearer_value(self):
+        debug = []
+        captured = []
+
+        def opener(request, *, timeout):
+            captured.append((request, timeout))
+            return FakeCatalogResponse(b'{"networkVolumeTypes": ["STANDARD"]}')
+
+        result = _fetch_catalog("never-print-this", "US-CA-2", debug=debug.append, opener=opener)
+        transcript = "\n".join(debug)
+        self.assertEqual(result["networkVolumeTypes"], ["STANDARD"])
+        self.assertEqual(captured[0][1], 20)
+        self.assertIn(">>> GET https://api.runpod.io/v2/catalog/datacenters/US-CA-2", transcript)
+        self.assertIn(">>> Authorization: Bearer <redacted>", transcript)
+        self.assertIn("<<< HTTP 200", transcript)
+        self.assertIn("<<< X-Request-ID: request-1", transcript)
+        self.assertIn('{"networkVolumeTypes": ["STANDARD"]}', transcript)
+        self.assertNotIn("never-print-this", transcript)
 
 
 if __name__ == "__main__":  # pragma: no cover

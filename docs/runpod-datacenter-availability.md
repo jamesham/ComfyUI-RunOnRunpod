@@ -25,6 +25,11 @@ types without a type filter. `--cpu-flavor` defaults to `cpu3c`, and
 the search. `--json` selects machine-readable output; human-readable output is
 the default.
 
+Pass `--debug-http` to write each catalog request and complete response
+(including response headers and body) to standard error. Request credential
+headers are redacted, including `RUNPOD_API_KEY`; normal results remain on
+standard output.
+
 The S3 filter uses RunPod's published [S3-compatible API data-center
 table](https://docs.runpod.io/storage/s3-api) as the authoritative source. The
 remaining capabilities come from live

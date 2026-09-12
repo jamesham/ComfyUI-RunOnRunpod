@@ -71,6 +71,7 @@ class RejectedDataCenter:
 
 
 Fetcher = Callable[[str, str], Mapping[str, object]]
+DebugWriter = Callable[[str], None]
 
 
 def _positive_integer(value: str) -> int:
@@ -108,20 +109,69 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         help="limit to an exact S3-capable RunPod data-center ID; repeatable",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--debug-http", action="store_true",
+        help="write catalog HTTP requests and responses to stderr (credentials are redacted)",
+    )
     return parser.parse_args(argv)
 
 
-def _fetch_catalog(api_key: str, data_center_id: str) -> Mapping[str, object]:
+def _redacted_header(name: str, value: str) -> str:
+    if name.casefold() in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
+        if name.casefold() == "authorization" and value.casefold().startswith("bearer "):
+            return "Bearer <redacted>"
+        return "<redacted>"
+    return value
+
+
+def _debug_request(debug: DebugWriter | None, request: Request) -> None:
+    if debug is None:
+        return
+    debug(f">>> {request.get_method()} {request.full_url}")
+    for name, value in request.header_items():
+        debug(f">>> {name}: {_redacted_header(name, value)}")
+    debug(">>>")
+
+
+def _debug_response(
+    debug: DebugWriter | None,
+    status: int,
+    headers: object,
+    body: bytes,
+) -> None:
+    if debug is None:
+        return
+    debug(f"<<< HTTP {status}")
+    items = headers.items() if hasattr(headers, "items") else ()
+    for name, value in items:
+        debug(f"<<< {name}: {_redacted_header(str(name), str(value))}")
+    debug("<<<")
+    debug(body.decode("utf-8", errors="replace"))
+
+
+def _fetch_catalog(
+    api_key: str,
+    data_center_id: str,
+    *,
+    debug: DebugWriter | None = None,
+    opener=urlopen,
+) -> Mapping[str, object]:
     request = Request(
         f"{CATALOG_BASE}/{quote(data_center_id, safe='-')}",
         headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
     )
+    _debug_request(debug, request)
     try:
-        with urlopen(request, timeout=20) as response:
-            value = json.loads(response.read().decode("utf-8"))
+        with opener(request, timeout=20) as response:
+            body = response.read()
+            _debug_response(debug, response.status, response.headers, body)
+            value = json.loads(body.decode("utf-8"))
     except HTTPError as error:
+        _debug_response(debug, error.code, error.headers, error.read())
         raise AvailabilityError(f"RunPod catalog request for {data_center_id} failed with HTTP {error.code}") from None
     except URLError as error:
+        if debug is not None:
+            debug(f"<<< transport error: {error.reason}")
         raise AvailabilityError(f"RunPod catalog request for {data_center_id} failed: {error.reason}") from None
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AvailabilityError(f"RunPod catalog response for {data_center_id} was not valid JSON") from error
@@ -358,7 +408,10 @@ def run(
         print("RUNPOD_API_KEY is required", file=errors)
         return 2
     cpu_flavors = tuple(arguments.cpu_flavor or ("cpu3c",))
-    actual_fetcher = fetcher or (lambda data_center_id, _s3: _fetch_catalog(api_key, data_center_id))
+    debug = (lambda message: print(message, file=errors)) if arguments.debug_http else None
+    actual_fetcher = fetcher or (
+        lambda data_center_id, _s3: _fetch_catalog(api_key, data_center_id, debug=debug)
+    )
     results, rejected = select_data_centers(
         actual_fetcher,
         cpu_flavors=cpu_flavors,
