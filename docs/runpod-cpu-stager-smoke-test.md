@@ -36,6 +36,9 @@ unchanged.
   `aiohttp` transport dependency before invoking `--live`.
 - A CPU Serverless template already points to an image built from
   [`worker-cpu/Dockerfile`](../worker-cpu/Dockerfile).
+- At least one eligible CPU flavor ID and a valid power-of-two vCPU count for
+  that flavor. Obtain valid IDs and limits from RunPod's v2 CPU catalog; the
+  harness passes these as the endpoint's explicit CPU configuration.
 - In the RunPod administrative UI, create two stored secrets:
   - an HMAC secret whose value also exists locally in the environment variable
     named by `--signing-key-env`;
@@ -68,6 +71,8 @@ python -m integration.runpod_cpu_stager_smoke \
   --data-center '<RUNPOD_DATA_CENTER>' \
   --cpu-template-id '<CPU_STAGER_TEMPLATE_ID>' \
   --cpu-image 'registry.example/runonrunpod-cpu@sha256:<IMAGE_DIGEST>' \
+  --cpu-flavor-id '<CPU_FLAVOR_ID>' \
+  --vcpu-count 4 \
   --hmac-secret-name '<RUNPOD_HMAC_SECRET_NAME>' \
   --provider hf \
   --provider-secret-name '<RUNPOD_HF_SECRET_NAME>' \

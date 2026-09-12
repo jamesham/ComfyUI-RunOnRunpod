@@ -58,8 +58,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--size", required=True, type=int, help="expected byte size of the one test download")
     parser.add_argument("--model-name", default="runpod-cpu-stager-smoke.bin", help="temporary model filename")
     parser.add_argument("--volume-size-gb", type=int, default=10)
-    parser.add_argument("--cpu-flavor-id", action="append", default=[], help="optional CPU flavor; may be repeated")
-    parser.add_argument("--vcpu-count", type=int)
+    parser.add_argument("--cpu-flavor-id", action="append", required=True, help="eligible CPU flavor ID; may be repeated")
+    parser.add_argument("--vcpu-count", type=int, required=True, help="vCPUs per worker; a power of two, at least 2")
     parser.add_argument("--idle-timeout-seconds", type=int, default=5)
     parser.add_argument("--execution-timeout-seconds", type=int, default=1800)
     parser.add_argument("--stage-timeout-seconds", type=int, default=1500)
@@ -71,6 +71,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("size, volume size, and execution timeout must be positive")
     if arguments.stage_timeout_seconds < 1 or arguments.stage_timeout_seconds > arguments.execution_timeout_seconds:
         parser.error("stage timeout must be positive and no greater than endpoint execution timeout")
+    if arguments.vcpu_count < 2 or arguments.vcpu_count & (arguments.vcpu_count - 1):
+        parser.error("--vcpu-count must be a power of two and at least 2")
     if "/" in arguments.model_name or "\\" in arguments.model_name or not arguments.model_name:
         parser.error("model name must be a single filename")
     if not arguments.download_url.startswith("https://"):

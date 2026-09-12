@@ -45,7 +45,10 @@ class ManagedSessionTests(unittest.TestCase):
         self.profile_path.write_text(json.dumps({
             "profile_version": 1, "profile_id": "operator-profile", "data_center": "dc-1",
             "volume": {"size_gb": 100},
-            "cpu": {"image": "cpu@sha256:abc", "template_id": "cpu-template"},
+            "cpu": {
+                "image": "cpu@sha256:abc", "template_id": "cpu-template",
+                "flavor_ids": ["cpu3c"], "vcpu_count": 4,
+            },
         }), encoding="utf-8")
         self.environment = {
             ROOT_ENV: self.directory.name, API_KEY_ENV: "server-only-key",
@@ -95,6 +98,27 @@ class ManagedSessionTests(unittest.TestCase):
     def test_invalid_profile_is_rejected_before_any_provider_request(self):
         self.profile_path.write_text("[]", encoding="utf-8")
         with self.assertRaisesRegex(ManagedSessionConfigError, "profile is invalid"):
+            lifecycle_from_environment(self.environment, transport=lambda *_: (500, None))
+
+    def test_managed_v2_lifecycle_requires_explicit_cpu_configuration(self):
+        self.profile_path.write_text(json.dumps({
+            "profile_version": 1, "profile_id": "operator-profile", "data_center": "dc-1",
+            "volume": {"size_gb": 100},
+            "cpu": {"image": "cpu@sha256:abc", "template_id": "cpu-template"},
+        }), encoding="utf-8")
+        with self.assertRaisesRegex(ManagedSessionConfigError, "flavor_ids and vcpu_count"):
+            lifecycle_from_environment(self.environment, transport=lambda *_: (500, None))
+
+    def test_managed_v2_lifecycle_rejects_an_invalid_vcpu_count(self):
+        self.profile_path.write_text(json.dumps({
+            "profile_version": 1, "profile_id": "operator-profile", "data_center": "dc-1",
+            "volume": {"size_gb": 100},
+            "cpu": {
+                "image": "cpu@sha256:abc", "template_id": "cpu-template",
+                "flavor_ids": ["cpu3c"], "vcpu_count": 3,
+            },
+        }), encoding="utf-8")
+        with self.assertRaisesRegex(ManagedSessionConfigError, "power of two"):
             lifecycle_from_environment(self.environment, transport=lambda *_: (500, None))
 
 

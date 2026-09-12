@@ -79,7 +79,8 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
     def _live_arguments():
         return [
             "--live", "--data-center", "dc-1", "--cpu-template-id", "template-cpu",
-            "--cpu-image", "image@sha256:abc", "--hmac-secret-name", "hmac",
+            "--cpu-image", "image@sha256:abc", "--cpu-flavor-id", "cpu3c", "--vcpu-count", "4",
+            "--hmac-secret-name", "hmac",
             "--provider-secret-name", "provider", "--download-url", "https://example.test/base",
             "--sha256", "a" * 64, "--size", "1", "--state-root", ".",
         ]

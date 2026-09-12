@@ -76,6 +76,14 @@ def lifecycle_from_environment(
     profile = profile_from_environment(values)
     if not profile.cpu_template_id:
         raise ManagedSessionConfigError("managed profile CPU configuration requires template_id")
+    if not profile.cpu_flavor_ids or profile.cpu_vcpu_count is None:
+        raise ManagedSessionConfigError(
+            "managed profile CPU configuration requires flavor_ids and vcpu_count for RunPod REST v2"
+        )
+    if profile.cpu_vcpu_count < 2 or profile.cpu_vcpu_count & (profile.cpu_vcpu_count - 1):
+        raise ManagedSessionConfigError(
+            "managed profile CPU vcpu_count must be a power of two and at least 2 for RunPod REST v2"
+        )
     coordinator = coordinator_from_environment(values)
     provider = RunPodLifecycleAdapter(api_key, allow_mutations=True, transport=transport)
     return SessionLifecycleService(coordinator, provider), profile

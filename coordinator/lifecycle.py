@@ -168,11 +168,11 @@ class SessionLifecycleService:
 
         if resource == "cpu_endpoint" and isinstance(recorded.get("volume_id"), str):
             expected_volume = recorded["volume_id"]
-            volumes = result.get("networkVolumeIds")
+            volumes = result.get("networkVolumes", result.get("networkVolumeIds"))
             attached = result.get("networkVolumeId") == expected_volume or (
                 isinstance(volumes, list) and expected_volume in volumes
             )
-            if "networkVolumeId" in result or "networkVolumeIds" in result:
+            if any(key in result for key in ("networkVolumeId", "networkVolumeIds", "networkVolumes")):
                 if not attached:
                     raise LifecycleError("provider CPU endpoint no longer has the recorded volume")
             result["volume_id"] = expected_volume
