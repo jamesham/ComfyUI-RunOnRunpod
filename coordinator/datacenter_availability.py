@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 
 CATALOG_BASE = "https://api.runpod.io/v2/catalog/datacenters"
+GPU_CATALOG_BASE = "https://api.runpod.io/v2/catalog/gpus"
 # Catalog data-center responses omit availability unless these documented
 # inclusions are explicitly requested. Keep the request construction here so
 # every catalog lookup uses the same real-time availability view.
@@ -56,7 +57,8 @@ class AvailabilityError(RuntimeError):
 class GpuOption:
     name: str
     price: float | None
-    price_field: str | None
+    price_type: str
+    serverless_pool_id: str | None
     availability: str
     preference_rank: int | None
 
@@ -76,6 +78,7 @@ class RejectedDataCenter:
 
 
 Fetcher = Callable[[str, str], Mapping[str, object]]
+GpuCatalogFetcher = Callable[[str], Mapping[str, object]]
 DebugWriter = Callable[[str], None]
 
 
@@ -95,7 +98,7 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--cpu-flavor", action="append", default=[], metavar="NAME",
-        help="acceptable CPU flavor; repeat for fallbacks (default: cpu3c)",
+        help="optional acceptable CPU flavor; repeat for fallbacks (default: any available flavor)",
     )
     parser.add_argument(
         "--gpu", action="append", default=[], metavar="NAME",
@@ -104,6 +107,10 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--cheapest-gpus", type=_positive_integer, default=1, metavar="N",
         help="cheapest available GPU options to show per data center (default: 1)",
+    )
+    parser.add_argument(
+        "--price-type", choices=("secure", "community", "serverless"), default="serverless",
+        help="GPU price type used for ranking and output (default: serverless)",
     )
     parser.add_argument(
         "--region", action="append", default=[], metavar="PREFIX",
@@ -154,16 +161,16 @@ def _debug_response(
     debug(body.decode("utf-8", errors="replace"))
 
 
-def _fetch_catalog(
+def _catalog_request(
     api_key: str,
-    data_center_id: str,
+    url: str,
+    resource_description: str,
     *,
     debug: DebugWriter | None = None,
     opener=urlopen,
 ) -> Mapping[str, object]:
-    query = urlencode({"include": ",".join(CATALOG_INCLUDES)})
     request = Request(
-        f"{CATALOG_BASE}/{quote(data_center_id, safe='-')}?{query}",
+        url,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
@@ -178,16 +185,50 @@ def _fetch_catalog(
             value = json.loads(body.decode("utf-8"))
     except HTTPError as error:
         _debug_response(debug, error.code, error.headers, error.read())
-        raise AvailabilityError(f"RunPod catalog request for {data_center_id} failed with HTTP {error.code}") from None
+        raise AvailabilityError(f"RunPod catalog request for {resource_description} failed with HTTP {error.code}") from None
     except URLError as error:
         if debug is not None:
             debug(f"<<< transport error: {error.reason}")
-        raise AvailabilityError(f"RunPod catalog request for {data_center_id} failed: {error.reason}") from None
+        raise AvailabilityError(f"RunPod catalog request for {resource_description} failed: {error.reason}") from None
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AvailabilityError(f"RunPod catalog response for {data_center_id} was not valid JSON") from error
+        raise AvailabilityError(f"RunPod catalog response for {resource_description} was not valid JSON") from error
     if not isinstance(value, Mapping):
-        raise AvailabilityError(f"RunPod catalog response for {data_center_id} was not an object")
+        raise AvailabilityError(f"RunPod catalog response for {resource_description} was not an object")
     return value
+
+
+def _fetch_catalog(
+    api_key: str,
+    data_center_id: str,
+    *,
+    debug: DebugWriter | None = None,
+    opener=urlopen,
+) -> Mapping[str, object]:
+    query = urlencode({"include": ",".join(CATALOG_INCLUDES)})
+    return _catalog_request(
+        api_key,
+        f"{CATALOG_BASE}/{quote(data_center_id, safe='-')}?{query}",
+        data_center_id,
+        debug=debug,
+        opener=opener,
+    )
+
+
+def _fetch_gpu_catalog(
+    api_key: str,
+    gpu_type_id: str,
+    *,
+    debug: DebugWriter | None = None,
+    opener=urlopen,
+) -> Mapping[str, object]:
+    """Get current price and serverless-pool metadata for one GPU type."""
+    return _catalog_request(
+        api_key,
+        f"{GPU_CATALOG_BASE}/{quote(gpu_type_id, safe='-')}",
+        f"GPU type {gpu_type_id}",
+        debug=debug,
+        opener=opener,
+    )
 
 
 def _catalog_items(value: object) -> list[Mapping[str, object]]:
@@ -268,24 +309,39 @@ def _matching_cpu_flavors(catalog: Mapping[str, object], requested: Sequence[str
     for item in entries:
         name = _item_name(item)
         available, _ = _availability(item)
-        if name and available and name.casefold() in requested_names:
-            matches.append(requested_names[name.casefold()])
+        if not name or not available:
+            continue
+        normalized_name = name.casefold()
+        if not requested_names:
+            matches.append(name)
+        elif normalized_name in requested_names:
+            matches.append(requested_names[normalized_name])
+        else:
+            for normalized_requested, requested_name in requested_names.items():
+                if normalized_name.startswith(f"{normalized_requested}-"):
+                    matches.append(requested_name)
+                    break
     return tuple(matches)
 
 
-def _price(item: Mapping[str, object]) -> tuple[float | None, str | None]:
-    """Return a comparable catalog price without assigning an unverified unit."""
-    for field in (
-        "activeCostPerSecond", "pricePerSecond", "costPerSecond", "price", "securePrice",
-    ):
-        value = item.get(field)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-            return float(value), field
-    return None, None
+def _gpu_price_and_pool(
+    gpu_catalog: Mapping[str, object], price_type: str,
+) -> tuple[float | None, str | None]:
+    """Return a documented USD/hour price and the serverless pool ID, if any."""
+    price = gpu_catalog.get("price")
+    value = price.get(price_type) if isinstance(price, Mapping) else None
+    numeric_price = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
+    pool = gpu_catalog.get("pool")
+    return numeric_price, pool if isinstance(pool, str) and pool else None
 
 
 def _matching_gpus(
-    catalog: Mapping[str, object], requested: Sequence[str], count: int,
+    catalog: Mapping[str, object],
+    requested: Sequence[str],
+    count: int,
+    price_type: str,
+    gpu_catalog_fetcher: GpuCatalogFetcher | None,
+    gpu_details: dict[str, Mapping[str, object]],
 ) -> tuple[GpuOption, ...]:
     entries = _catalog_collection(catalog, ("gpuTypes", "gpus", "gpuAvailability"))
     preference = {name.casefold(): index for index, name in enumerate(requested)}
@@ -295,8 +351,12 @@ def _matching_gpus(
         available, status = _availability(item)
         if not name or not available or (preference and name.casefold() not in preference):
             continue
-        price, price_field = _price(item)
-        options.append(GpuOption(name, price, price_field, status, preference.get(name.casefold())))
+        details = gpu_details.get(name)
+        if details is None and gpu_catalog_fetcher is not None:
+            details = gpu_catalog_fetcher(name)
+            gpu_details[name] = details
+        price, pool = _gpu_price_and_pool(details or {}, price_type)
+        options.append(GpuOption(name, price, price_type, pool, status, preference.get(name.casefold())))
     options.sort(key=lambda option: (
         option.price is None,
         option.price if option.price is not None else float("inf"),
@@ -325,6 +385,8 @@ def select_data_centers(
     cpu_flavors: Sequence[str],
     gpu_preferences: Sequence[str],
     cheapest_gpus: int,
+    price_type: str = "serverless",
+    gpu_catalog_fetcher: GpuCatalogFetcher | None = None,
     regions: Sequence[str] = (),
     data_centers: Sequence[str] = (),
 ) -> tuple[list[DataCenterResult], list[RejectedDataCenter]]:
@@ -334,6 +396,7 @@ def select_data_centers(
     requested_ids = tuple(item.upper() for item in data_centers) or tuple(S3_ENDPOINTS)
     results: list[DataCenterResult] = []
     rejected: list[RejectedDataCenter] = []
+    gpu_details: dict[str, Mapping[str, object]] = {}
     for data_center_id in requested_ids:
         reasons = []
         s3_endpoint = S3_ENDPOINTS.get(data_center_id)
@@ -351,8 +414,18 @@ def select_data_centers(
             reasons.append("Standard-performance network volume is unavailable")
         cpu_matches = _matching_cpu_flavors(catalog, cpu_flavors)
         if not cpu_matches:
-            reasons.append(f"no requested CPU flavor available ({', '.join(cpu_flavors)})")
-        gpus = _matching_gpus(catalog, gpu_preferences, cheapest_gpus)
+            if cpu_flavors:
+                reasons.append(f"no requested CPU flavor available ({', '.join(cpu_flavors)})")
+            else:
+                reasons.append("no CPU flavor is currently available")
+        gpus = _matching_gpus(
+            catalog,
+            gpu_preferences,
+            cheapest_gpus,
+            price_type,
+            gpu_catalog_fetcher,
+            gpu_details,
+        )
         if not gpus:
             reasons.append("no matching GPU is currently available")
         if reasons:
@@ -388,8 +461,9 @@ def _human_value(
             "  Cheapest available GPUs:",
         ))
         for index, gpu in enumerate(result.gpus, start=1):
-            price = "price unavailable" if gpu.price is None else f"{gpu.price:g} ({gpu.price_field})"
-            lines.append(f"    {index}. {gpu.name}: {price}; {gpu.availability}")
+            price = "price unavailable" if gpu.price is None else f"${gpu.price:g}/GPU-hour ({gpu.price_type})"
+            pool = gpu.serverless_pool_id or "none"
+            lines.append(f"    {index}. {gpu.name}: {price}; serverless pool: {pool}; {gpu.availability}")
     if rejected:
         if lines:
             lines.append("")
@@ -405,6 +479,7 @@ def run(
     *,
     environ: Mapping[str, str] | None = None,
     fetcher: Fetcher | None = None,
+    gpu_fetcher: GpuCatalogFetcher | None = None,
     stdout=None,
     stderr=None,
 ) -> int:
@@ -417,16 +492,21 @@ def run(
     if not api_key:
         print("RUNPOD_API_KEY is required", file=errors)
         return 2
-    cpu_flavors = tuple(arguments.cpu_flavor or ("cpu3c",))
+    cpu_flavors = tuple(arguments.cpu_flavor)
     debug = (lambda message: print(message, file=errors)) if arguments.debug_http else None
     actual_fetcher = fetcher or (
         lambda data_center_id, _s3: _fetch_catalog(api_key, data_center_id, debug=debug)
+    )
+    gpu_catalog_fetcher = gpu_fetcher or (
+        lambda gpu_type_id: _fetch_gpu_catalog(api_key, gpu_type_id, debug=debug)
     )
     results, rejected = select_data_centers(
         actual_fetcher,
         cpu_flavors=cpu_flavors,
         gpu_preferences=tuple(arguments.gpu),
         cheapest_gpus=arguments.cheapest_gpus,
+        price_type=arguments.price_type,
+        gpu_catalog_fetcher=gpu_catalog_fetcher,
         regions=tuple(arguments.region),
         data_centers=tuple(arguments.datacenter),
     )
