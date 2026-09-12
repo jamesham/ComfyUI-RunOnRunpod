@@ -97,7 +97,7 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sleep.await_count, 2)
         self.assertEqual(api_calls[0], (
             "POST", "https://api.runpod.ai/v2/cpu-endpoint/run",
-            {"operation_id": "prep-1", "model_count": 1}, 200, {"id": "job-1"},
+            {"input": {"signed_request": self.envelope}}, 200, {"id": "job-1"},
         ))
         self.assertEqual([call[0] for call in api_calls[1:]], ["GET", "GET"])
 

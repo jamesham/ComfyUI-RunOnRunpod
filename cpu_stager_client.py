@@ -46,22 +46,19 @@ async def stage_models(
         "User-Agent": "ComfyUI-RunOnRunpod",
     }
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    request_summary = {
-        "operation_id": request.get("operation_id"),
-        "model_count": len(request.get("models", [])),
-    }
+    request_body = {"input": {"signed_request": signed_request}}
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"https://api.runpod.ai/v2/{endpoint_id}/run",
             headers=headers,
-            json={"input": {"signed_request": signed_request}},
+            json=request_body,
         ) as response:
             submitted = await response.json()
             submitted_status = getattr(response, "status", None)
         if on_api_call:
             on_api_call(
                 "POST", f"https://api.runpod.ai/v2/{endpoint_id}/run",
-                request_summary, submitted_status, submitted,
+                request_body, submitted_status, submitted,
             )
         job_id = submitted.get("id") if isinstance(submitted, dict) else None
         if not job_id:

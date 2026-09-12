@@ -33,15 +33,19 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
         with contextlib.redirect_stderr(output):
             _debug_api_call("POST", "/serverless", {
                 "Authorization": "api-key", "env": {"HF_TOKEN": "provider-token"},
-                "signed_request": "signed-envelope",
+                "signed_request": {
+                    "payload": {"models": [{"url": "https://example.test/model"}]},
+                    "signature": "signed-envelope",
+                },
             }, 201, {"token": "result-token", "id": "endpoint-1"})
         value = output.getvalue()
         self.assertIn('"status": 201', value)
         self.assertIn('"id": "endpoint-1"', value)
         self.assertNotIn("api-key", value)
         self.assertNotIn("provider-token", value)
-        self.assertNotIn("signed-envelope", value)
         self.assertNotIn("result-token", value)
+        self.assertIn("signed-envelope", value)
+        self.assertIn("https://example.test/model", value)
 
     def test_debug_flag_passes_the_trace_callback_to_both_runpod_clients(self):
         coordinator = Mock()

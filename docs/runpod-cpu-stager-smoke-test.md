@@ -89,8 +89,11 @@ non-interactively.
 
 Add `--debug` to write a line for every RunPod lifecycle and Serverless API
 call to stderr. Each line includes the method, path, HTTP status, and a
-redacted request/result summary. Authorization headers, HMACs, tokens, signed
-requests, and all endpoint environment-variable values are redacted.
+redacted request/result summary. Authorization headers, HMAC key material,
+tokens, and all endpoint environment-variable values are redacted. The signed
+`/run` job envelope is shown in full so the signed model specification and
+signature can be inspected. It does not contain the HMAC key, but it may
+contain model-source URLs and should be treated as operationally sensitive.
 
 ## Cleanup and failure behavior
 

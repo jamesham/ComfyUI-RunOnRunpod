@@ -26,7 +26,7 @@ from resource_plan import ModelIdentity, compile_model_resource_plan
 
 _SECRET_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _SENSITIVE_DEBUG_FIELDS = frozenset({
-    "authorization", "apikey", "token", "secret", "password", "credential", "hmac", "signedrequest",
+    "authorization", "apikey", "token", "secret", "password", "credential", "hmac",
 })
 
 
@@ -48,6 +48,11 @@ def _debug_value(value: object, field_name: str = "") -> object:
     normalized_name = re.sub(r"[^a-z0-9]", "", field_name.lower())
     if normalized_name in _SENSITIVE_DEBUG_FIELDS:
         return "<redacted>"
+    if normalized_name == "signedrequest":
+        # An HMAC envelope has no signing key. Its payload and signature are
+        # deliberately retained for --debug so the exact /run job body can be
+        # inspected; its model URLs may still be sensitive operational data.
+        return _debug_value(value) if isinstance(value, Mapping) else "<redacted>"
     if isinstance(value, Mapping):
         if normalized_name == "env":
             return {str(name): "<redacted>" for name in value}
