@@ -195,6 +195,33 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         self.assertEqual(results[0].gpus[0].price_type, "community")
         self.assertEqual(results[0].gpus[0].serverless_pool_id, "ADA_24")
 
+    def test_price_max_requires_the_cheapest_matching_gpu_to_be_strictly_cheaper(self):
+        results, rejected = select_data_centers(
+            self.fetch, cpu_flavors=("cpu3c",), gpu_preferences=(), cheapest_gpus=2,
+            price_type="serverless", price_max=1.11,
+            gpu_catalog_fetcher=self.fetch_gpu, data_centers=("US-CA-2",),
+        )
+        self.assertEqual([item.data_center_id for item in results], ["US-CA-2"])
+        self.assertEqual(rejected, [])
+
+        results, rejected = select_data_centers(
+            self.fetch, cpu_flavors=("cpu3c",), gpu_preferences=(), cheapest_gpus=2,
+            price_type="serverless", price_max=1.10,
+            gpu_catalog_fetcher=self.fetch_gpu, data_centers=("US-CA-2",),
+        )
+        self.assertEqual(results, [])
+        self.assertIn("not less than price maximum $1.1", rejected[0].reasons[0])
+
+    def test_cli_applies_price_max(self):
+        stdout = io.StringIO()
+        result = run(
+            ["--datacenter", "US-CA-2", "--price-max", "1.11"],
+            environ={"RUNPOD_API_KEY": "test"}, fetcher=self.fetch,
+            gpu_fetcher=self.fetch_gpu, stdout=stdout,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("US-CA-2", stdout.getvalue())
+
     def test_http_debug_outputs_catalog_exchange_without_bearer_value(self):
         debug = []
         captured = []

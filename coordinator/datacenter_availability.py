@@ -11,6 +11,7 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
+import math
 import os
 import sys
 from typing import Callable, Iterable, Mapping, Sequence
@@ -93,6 +94,16 @@ def _positive_integer(value: str) -> int:
     return result
 
 
+def _price_maximum(value: str) -> float:
+    try:
+        result = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a non-negative dollar amount") from error
+    if not math.isfinite(result) or result < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative dollar amount")
+    return result
+
+
 def _boolean(value: str) -> bool:
     normalized = value.casefold()
     if normalized in {"true", "yes", "1"}:
@@ -121,6 +132,10 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--price-type", choices=("secure", "community", "serverless"), default="serverless",
         help="GPU price type used for ranking and output (default: serverless)",
+    )
+    parser.add_argument(
+        "--price-max", type=_price_maximum, metavar="DOLLARS",
+        help="require the cheapest matching GPU to cost less than this USD GPU-hour amount",
     )
     parser.add_argument(
         "--region", action="append", default=[], metavar="PREFIX",
@@ -432,10 +447,13 @@ def select_data_centers(
     regions: Sequence[str] = (),
     data_centers: Sequence[str] = (),
     s3_required: bool = True,
+    price_max: float | None = None,
 ) -> tuple[list[DataCenterResult], list[RejectedDataCenter]]:
     """Return live data centers that meet the requested capability filters."""
     if cheapest_gpus < 1:
         raise ValueError("cheapest_gpus must be positive")
+    if price_max is not None and (not math.isfinite(price_max) or price_max < 0):
+        raise ValueError("price_max must be a non-negative finite number")
     requested_ids = tuple(item.upper() for item in data_centers) or tuple(S3_ENDPOINTS)
     results: list[DataCenterResult] = []
     rejected: list[RejectedDataCenter] = []
@@ -471,6 +489,15 @@ def select_data_centers(
         )
         if not gpus:
             reasons.append("no matching GPU is currently available")
+        elif price_max is not None:
+            cheapest = gpus[0]
+            if cheapest.price is None:
+                reasons.append(f"cheapest matching GPU has no {price_type} price")
+            elif cheapest.price >= price_max:
+                reasons.append(
+                    f"cheapest matching GPU costs ${cheapest.price:g}/GPU-hour "
+                    f"({price_type}), not less than price maximum ${price_max:g}",
+                )
         if reasons:
             rejected.append(RejectedDataCenter(data_center_id, tuple(reasons)))
         else:
@@ -564,6 +591,7 @@ def run(
         regions=tuple(arguments.region),
         data_centers=requested_data_centers,
         s3_required=arguments.s3_required,
+        price_max=arguments.price_max,
     )
     checked_at = datetime.now(timezone.utc).isoformat()
     value = _json_value(checked_at, results, rejected) if arguments.json else _human_value(checked_at, results, rejected)

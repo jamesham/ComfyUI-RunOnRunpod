@@ -35,6 +35,12 @@ prices for a particular data center.
 the search. `--json` selects machine-readable output; human-readable output is
 the default.
 
+`--price-max` accepts a non-negative USD GPU-hour amount without a currency
+symbol, such as `1.5`, `1.50`, or `2`. A data center is returned only when its
+cheapest matching GPU for the selected `--price-type` has a known price strictly
+less than that amount. For example, `--price-type serverless --price-max 1.5`
+excludes a site whose cheapest matching serverless GPU costs exactly `$1.50`.
+
 `--s3-required` accepts `true` (the default) or `false`. With `true`, a data
 center must appear in RunPod's S3-compatible API table. With `false`, the
 utility discovers candidates from the live RunPod catalog instead, so S3 is not
