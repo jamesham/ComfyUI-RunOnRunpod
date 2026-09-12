@@ -7,3 +7,6 @@ dist/
 build/
 .venv/
 cache/
+.agents/
+skills-lock.json
+.runpod-smoke-state/
