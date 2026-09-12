@@ -36,7 +36,10 @@ async def stage_models(
     except ImportError:
         raise CpuStagerError("CPU staging transport requires aiohttp") from None
     request = unsigned_stage_payload(signed_request)
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "ComfyUI-RunOnRunpod",
+    }
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     async with aiohttp.ClientSession() as session:
         async with session.post(

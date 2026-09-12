@@ -80,7 +80,12 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, self.result)
         self.assertEqual(progress, [{"results": []}])
         self.assertEqual(session.posts[0][0], "https://api.runpod.ai/v2/cpu-endpoint/run")
-        self.assertEqual(session.posts[0][1]["headers"], {"Authorization": "Bearer api-key"})
+        self.assertEqual(session.posts[0][1]["headers"], {
+            "Authorization": "Bearer api-key", "User-Agent": "ComfyUI-RunOnRunpod",
+        })
+        self.assertEqual(session.gets[0][1]["headers"], {
+            "Authorization": "Bearer api-key", "User-Agent": "ComfyUI-RunOnRunpod",
+        })
         self.assertEqual(session.posts[0][1]["json"], {"input": {"signed_request": self.envelope}})
         self.assertEqual(len(session.gets), 2)
         self.assertEqual(sleep.await_count, 2)
