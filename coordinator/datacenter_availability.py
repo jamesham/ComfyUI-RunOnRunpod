@@ -15,11 +15,16 @@ import os
 import sys
 from typing import Callable, Iterable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
 CATALOG_BASE = "https://api.runpod.io/v2/catalog/datacenters"
+# Catalog data-center responses omit availability unless these documented
+# inclusions are explicitly requested. Keep the request construction here so
+# every catalog lookup uses the same real-time availability view.
+CATALOG_INCLUDES = ("CPU_AVAILABILITY", "GPU_AVAILABILITY")
+USER_AGENT = "ComfyUI-RunOnRunpod-DatacenterAvailability/0.3.1"
 
 # RunPod's published S3-compatible API availability table is the authoritative
 # source for this filter until RunPod provides a capability field in its API.
@@ -156,9 +161,14 @@ def _fetch_catalog(
     debug: DebugWriter | None = None,
     opener=urlopen,
 ) -> Mapping[str, object]:
+    query = urlencode({"include": ",".join(CATALOG_INCLUDES)})
     request = Request(
-        f"{CATALOG_BASE}/{quote(data_center_id, safe='-')}",
-        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        f"{CATALOG_BASE}/{quote(data_center_id, safe='-')}?{query}",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
     )
     _debug_request(debug, request)
     try:

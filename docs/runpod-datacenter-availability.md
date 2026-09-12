@@ -28,7 +28,10 @@ the default.
 Pass `--debug-http` to write each catalog request and complete response
 (including response headers and body) to standard error. Request credential
 headers are redacted, including `RUNPOD_API_KEY`; normal results remain on
-standard output.
+standard output. Catalog requests explicitly identify this utility with the
+`ComfyUI-RunOnRunpod-DatacenterAvailability/0.3.1` User-Agent and include both
+`CPU_AVAILABILITY` and `GPU_AVAILABILITY`, since RunPod otherwise omits those
+availability sections from a data-center response.
 
 The S3 filter uses RunPod's published [S3-compatible API data-center
 table](https://docs.runpod.io/storage/s3-api) as the authoritative source. The

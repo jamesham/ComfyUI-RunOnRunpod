@@ -4,7 +4,14 @@ import contextlib
 import io
 import unittest
 
-from coordinator.datacenter_availability import S3_ENDPOINTS, _fetch_catalog, run, select_data_centers
+from coordinator.datacenter_availability import (
+    CATALOG_INCLUDES,
+    S3_ENDPOINTS,
+    USER_AGENT,
+    _fetch_catalog,
+    run,
+    select_data_centers,
+)
 
 
 class FakeCatalogResponse:
@@ -117,7 +124,14 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         transcript = "\n".join(debug)
         self.assertEqual(result["networkVolumeTypes"], ["STANDARD"])
         self.assertEqual(captured[0][1], 20)
-        self.assertIn(">>> GET https://api.runpod.io/v2/catalog/datacenters/US-CA-2", transcript)
+        request = captured[0][0]
+        self.assertEqual(request.get_header("User-agent"), USER_AGENT)
+        self.assertIn(
+            ">>> GET https://api.runpod.io/v2/catalog/datacenters/US-CA-2?include=CPU_AVAILABILITY%2CGPU_AVAILABILITY",
+            transcript,
+        )
+        self.assertEqual(request.full_url.split("include=", 1)[1], "%2C".join(CATALOG_INCLUDES))
+        self.assertIn(f">>> User-agent: {USER_AGENT}", transcript)
         self.assertIn(">>> Authorization: Bearer <redacted>", transcript)
         self.assertIn("<<< HTTP 200", transcript)
         self.assertIn("<<< X-Request-ID: request-1", transcript)
