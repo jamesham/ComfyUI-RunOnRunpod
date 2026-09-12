@@ -38,7 +38,7 @@ def _destination(target_path: str) -> str:
 
 
 def _headers(auth: str) -> dict[str, str]:
-    headers = {"User-Agent": "ComfyUI-RunOnRunpod-CPU-Stager"}
+    headers = {"User-Agent": "ComfyUI-RunOnRunpod"}
     if auth == "hf":
         token = os.environ.get("HF_TOKEN")
         if token:
