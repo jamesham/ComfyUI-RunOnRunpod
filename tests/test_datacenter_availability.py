@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import unittest
 
 from coordinator.datacenter_availability import (
@@ -159,7 +160,55 @@ class DataCenterAvailabilityTests(unittest.TestCase):
         self.assertIn("NVIDIA GeForce RTX 4090", stdout.getvalue())
         self.assertIn("$1.1/GPU-hour (serverless)", stdout.getvalue())
         self.assertIn("serverless pool: ADA_24", stdout.getvalue())
+        self.assertIn("Rejected data centers: 0", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_hides_rejection_details_unless_requested(self):
+        arguments = [
+            "--datacenter", "US-CA-2", "--datacenter", "EU-CZ-1", "--cpu-flavor", "cpu3c",
+        ]
+        stdout = io.StringIO()
+        result = run(
+            arguments, environ={"RUNPOD_API_KEY": "test"}, fetcher=self.fetch,
+            gpu_fetcher=self.fetch_gpu, stdout=stdout,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Rejected data centers: 1", stdout.getvalue())
+        self.assertNotIn("EU-CZ-1", stdout.getvalue())
+
+        shown = io.StringIO()
+        result = run(
+            arguments + ["--show-rejected"], environ={"RUNPOD_API_KEY": "test"},
+            fetcher=self.fetch, gpu_fetcher=self.fetch_gpu, stdout=shown,
+        )
+        self.assertEqual(result, 0)
+        self.assertIn("Rejected data centers: 1", shown.getvalue())
+        self.assertIn("EU-CZ-1", shown.getvalue())
+        self.assertIn("CPU flavor", shown.getvalue())
+
+    def test_json_reports_rejection_count_and_optionally_details(self):
+        arguments = [
+            "--json", "--datacenter", "US-CA-2", "--datacenter", "EU-CZ-1", "--cpu-flavor", "cpu3c",
+        ]
+        hidden = io.StringIO()
+        result = run(
+            arguments, environ={"RUNPOD_API_KEY": "test"}, fetcher=self.fetch,
+            gpu_fetcher=self.fetch_gpu, stdout=hidden,
+        )
+        self.assertEqual(result, 0)
+        hidden_value = json.loads(hidden.getvalue())
+        self.assertEqual(hidden_value["rejected_count"], 1)
+        self.assertNotIn("rejected", hidden_value)
+
+        shown = io.StringIO()
+        result = run(
+            arguments + ["--show-rejected"], environ={"RUNPOD_API_KEY": "test"},
+            fetcher=self.fetch, gpu_fetcher=self.fetch_gpu, stdout=shown,
+        )
+        self.assertEqual(result, 0)
+        shown_value = json.loads(shown.getvalue())
+        self.assertEqual(shown_value["rejected_count"], 1)
+        self.assertEqual(shown_value["rejected"][0]["data_center_id"], "EU-CZ-1")
 
     def test_cli_json_and_missing_api_key(self):
         stdout = io.StringIO()

@@ -151,6 +151,10 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
+        "--show-rejected", action="store_true",
+        help="include rejected data-center IDs and rejection reasons in the output",
+    )
+    parser.add_argument(
         "--debug-http", action="store_true",
         help="write catalog HTTP requests and responses to stderr (credentials are redacted)",
     )
@@ -509,18 +513,25 @@ def _json_value(
     checked_at: str,
     results: Sequence[DataCenterResult],
     rejected: Sequence[RejectedDataCenter],
+    *,
+    show_rejected: bool,
 ) -> str:
-    return json.dumps({
+    value: dict[str, object] = {
         "checked_at": checked_at,
         "data_centers": [asdict(result) for result in results],
-        "rejected": [asdict(result) for result in rejected],
-    }, indent=2, sort_keys=True)
+        "rejected_count": len(rejected),
+    }
+    if show_rejected:
+        value["rejected"] = [asdict(result) for result in rejected]
+    return json.dumps(value, indent=2, sort_keys=True)
 
 
 def _human_value(
     checked_at: str,
     results: Sequence[DataCenterResult],
     rejected: Sequence[RejectedDataCenter],
+    *,
+    show_rejected: bool,
 ) -> str:
     lines = [f"Checked: {checked_at}", ""]
     for result in results:
@@ -534,13 +545,13 @@ def _human_value(
             price = "price unavailable" if gpu.price is None else f"${gpu.price:g}/GPU-hour ({gpu.price_type})"
             pool = gpu.serverless_pool_id or "none"
             lines.append(f"    {index}. {gpu.name}: {price}; serverless pool: {pool}; {gpu.availability}")
-    if rejected:
-        if lines:
-            lines.append("")
-        lines.append("Rejected data centers:")
-        lines.extend(f"  {item.data_center_id}: {'; '.join(item.reasons)}" for item in rejected)
-    if not results and not rejected:
+    if not results:
         lines.append("No data centers matched the requested filters.")
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append(f"Rejected data centers: {len(rejected)}")
+    if show_rejected and rejected:
+        lines.extend(f"  {item.data_center_id}: {'; '.join(item.reasons)}" for item in rejected)
     return "\n".join(lines)
 
 
@@ -594,7 +605,11 @@ def run(
         price_max=arguments.price_max,
     )
     checked_at = datetime.now(timezone.utc).isoformat()
-    value = _json_value(checked_at, results, rejected) if arguments.json else _human_value(checked_at, results, rejected)
+    value = (
+        _json_value(checked_at, results, rejected, show_rejected=arguments.show_rejected)
+        if arguments.json
+        else _human_value(checked_at, results, rejected, show_rejected=arguments.show_rejected)
+    )
     print(value, file=output)
     return 0 if results else 1
 

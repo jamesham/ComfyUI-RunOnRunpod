@@ -33,7 +33,10 @@ with the GPU type or serverless pool, not individually negotiated allocation
 prices for a particular data center.
 `--cheapest-gpus` defaults to `1`. Repeat `--region` or `--datacenter` to narrow
 the search. `--json` selects machine-readable output; human-readable output is
-the default.
+the default. Both output formats always report the rejected-data-center count,
+but omit individual rejection records by default. Add `--show-rejected` to
+include their IDs and rejection reasons. In JSON, that flag adds the
+`rejected` array; otherwise only `rejected_count` is emitted.
 
 `--price-max` accepts a non-negative USD GPU-hour amount without a currency
 symbol, such as `1.5`, `1.50`, or `2`. A data center is returned only when its
