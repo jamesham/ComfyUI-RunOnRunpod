@@ -7,7 +7,6 @@ import os
 import base64
 from pathlib import PurePosixPath
 from contextlib import contextmanager
-import fcntl
 
 import requests
 import runpod
@@ -22,6 +21,7 @@ from cpu_artifact_contract import (
     CpuArtifactContractError,
     verify_signed_artifact_request,
 )
+from file_lock import advisory_file_lock
 
 
 VOLUME_DIR = os.environ.get("STAGING_VOLUME_DIR", "/runpod-volume")
@@ -61,11 +61,8 @@ def _target_lock(destination: str):
     """Serialize competing CPU jobs that publish the same volume target."""
     lock_path = f"{destination}.stage.lock"
     with open(lock_path, "a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
+        with advisory_file_lock(handle):
             yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _stage_one(model: dict) -> dict[str, object]:

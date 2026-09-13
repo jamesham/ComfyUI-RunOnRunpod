@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir runpod requests
 COPY cpu_staging_contract.py /app/cpu_staging_contract.py
 COPY cpu_artifact_contract.py /app/cpu_artifact_contract.py
 COPY resource_plan.py /app/resource_plan.py
+COPY file_lock.py /app/file_lock.py
 COPY worker-cpu/handler.py /app/handler.py
 
 WORKDIR /app

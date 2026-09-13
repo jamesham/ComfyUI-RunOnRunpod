@@ -9,7 +9,6 @@ explicitly enables it.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -28,6 +27,7 @@ try:  # Plugin package import; see fallback for direct coordinator tooling.
         validate_stage_result,
     )
     from ..resource_plan import ModelResourcePlan, model_resource_plan_dict, model_resource_plan_sha256
+    from ..file_lock import advisory_file_lock, fsync_directory
 except ImportError:  # pragma: no cover - exercised by direct CLI/library use.
     from cpu_staging_contract import (
         CpuStagingContractError,
@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - exercised by direct CLI/library use.
         validate_stage_result,
     )
     from resource_plan import ModelResourcePlan, model_resource_plan_dict, model_resource_plan_sha256
+    from file_lock import advisory_file_lock, fsync_directory
 
 
 RECIPE_VERSION = 1
@@ -81,11 +82,7 @@ def _atomic_json(path: Path, value: object) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        fsync_directory(path.parent)
     except Exception:
         try:
             os.unlink(temporary)
@@ -144,11 +141,8 @@ class SessionCoordinator:
         lock_path = self.root / "sessions" / session_id / "lifecycle.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def save_recipe(
         self,
@@ -197,8 +191,7 @@ class SessionCoordinator:
 
         path = self._recipe_path(recipe_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 revision = 1
                 if path.exists():
                     revision = int(_read_json(path).get("revision", 0)) + 1
@@ -210,8 +203,6 @@ class SessionCoordinator:
                 }
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def save_profile(self, profile_id: str, profile: Mapping[str, object]) -> dict[str, object]:
         """Persist a validated-by-caller profile without credentials."""
@@ -220,8 +211,7 @@ class SessionCoordinator:
             raise CoordinatorError("profile must be an object")
         path = self._profile_path(profile_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 revision = 1
                 if path.exists():
                     revision = int(_read_json(path).get("revision", 0)) + 1
@@ -229,8 +219,6 @@ class SessionCoordinator:
                 record.update({"profile_id": profile_id, "revision": revision, "updated_at": _now()})
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def get_profile(self, profile_id: str) -> dict[str, object]:
         return _read_json(self._profile_path(_id(profile_id, "profile ID")))
@@ -256,8 +244,7 @@ class SessionCoordinator:
         session_id = _id(session_id or uuid.uuid4().hex, "session ID")
         path = self._session_path(session_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 if path.exists():
                     raise CoordinatorError(f"session already exists: {session_id}")
                 recipe = _read_json(self._recipe_path(recipe_id))
@@ -276,8 +263,6 @@ class SessionCoordinator:
                 }
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def record_lifecycle_operation(
         self,
@@ -301,8 +286,7 @@ class SessionCoordinator:
             raise CoordinatorError("unsupported lifecycle operation state")
         path = self._session_path(session_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 record = _read_json(path)
                 operations = record.get("operations")
                 if not isinstance(operations, dict):
@@ -338,8 +322,6 @@ class SessionCoordinator:
                 record["updated_at"] = _now()
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def create_session(
         self,
@@ -363,8 +345,7 @@ class SessionCoordinator:
             raise CoordinatorError("GPU endpoint ID must be a string")
         path = self._session_path(session_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 if path.exists():
                     raise CoordinatorError(f"session already exists: {session_id}")
                 recipe = _read_json(self._recipe_path(recipe_id))
@@ -381,8 +362,6 @@ class SessionCoordinator:
                 }
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def authorize_stage(
         self,
@@ -396,8 +375,7 @@ class SessionCoordinator:
         prep_id = _id(prep_id, "preparation ID")
         path = self._session_path(session_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 record = _read_json(path)
                 if record.get("state") not in ("planned", "preparing", "ready"):
                     raise CoordinatorError(f"session cannot stage while {record.get('state')}")
@@ -424,8 +402,7 @@ class SessionCoordinator:
                 record["state"] = "preparing"
                 record["updated_at"] = _now()
                 _atomic_json(path, record)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
         return sign_stage_request(request, signing_key)
 
     def record_stage_result(self, session_id: str, prep_id: str, result: object) -> dict[str, object]:
@@ -434,8 +411,7 @@ class SessionCoordinator:
         prep_id = _id(prep_id, "preparation ID")
         path = self._session_path(session_id)
         with self._with_lock(path) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
+            with advisory_file_lock(lock):
                 record = _read_json(path)
                 preparation = (record.get("preparations") or {}).get(prep_id)
                 if not isinstance(preparation, Mapping) or not isinstance(preparation.get("request"), Mapping):
@@ -451,8 +427,6 @@ class SessionCoordinator:
                 record["updated_at"] = _now()
                 _atomic_json(path, record)
                 return record
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def get_session(self, session_id: str) -> dict[str, object]:
         return _read_json(self._session_path(_id(session_id, "session ID")))
