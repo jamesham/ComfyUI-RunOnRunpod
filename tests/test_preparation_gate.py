@@ -164,14 +164,14 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             )
         fake = Mock()
         fake.get_session.return_value = {
+            "profile_id": "profile-1", "recipe_id": "recipe-1",
             "bindings": {"cpu_endpoint_id": "managed-cpu", "volume_binding": "volume-1"},
         }
         fake.authorize_stage.return_value = {"payload": "signed"}
-        with patch.object(self.routes, "SessionCoordinator", return_value=fake), \
-             patch.dict("os.environ", {
-                 "RUNONRUNPOD_COORDINATOR_ROOT": "/managed-state",
-                 "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "server-only",
-             }, clear=False):
+        with patch.object(
+            self.routes, "managed_configuration_from_settings",
+            return_value=(fake, Mock(profile_id="profile-1"), "recipe-1"),
+        ), patch.object(self.routes, "signing_key_from_settings", return_value="ui-supplied"):
             operation = self.routes._cpu_stager_request(
                 dict(self.settings, stagingMode="cpu", managedSessionId="session-1"), preparation, "prep-1",
             )
@@ -179,7 +179,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(operation.session_id, "session-1")
         self.assertIs(operation.coordinator, fake)
         fake.authorize_stage.assert_called_once_with(
-            "session-1", "prep-1", preparation.worker_downloads, "server-only",
+            "session-1", "prep-1", preparation.worker_downloads, "ui-supplied",
         )
 
     async def test_gpu_mode_is_default_and_uses_legacy_worker_fetch(self):
@@ -227,6 +227,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_cpu_submission_prepares_before_any_gpu_or_s3_call(self):
         settings = dict(
             self.settings, stagingMode="cpu", managedSessionId="session-1",
+            managedProfile="{\"profile_version\": 1}", managedSigningKey="hmac",
         )
         for key in ("endpointId", "bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl"):
             settings.pop(key)

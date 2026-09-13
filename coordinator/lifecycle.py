@@ -23,6 +23,8 @@ _GPU_PROVIDER_CREDENTIALS = {
     "HF_TOKEN",
     "HUGGING_FACE_HUB_TOKEN",
 }
+_CPU_SECRET_ENVIRONMENT = _GPU_PROVIDER_CREDENTIALS | {"STAGING_REQUEST_HMAC_KEY"}
+_SECRET_REFERENCE = re.compile(r"^\{\{ RUNPOD_SECRET_[A-Za-z0-9_-]+ \}\}$")
 
 
 class LifecycleError(RuntimeError):
@@ -133,6 +135,15 @@ class ManagedProfile:
             for name, content in environment.items()
         ):
             raise LifecycleError("cpu.environment must map environment names to non-empty strings")
+        literal_secrets = sorted(
+            name for name, content in environment.items()
+            if name in _CPU_SECRET_ENVIRONMENT and not _SECRET_REFERENCE.fullmatch(content)
+        )
+        if literal_secrets:
+            raise LifecycleError(
+                "CPU credential environment values must use RunPod stored-secret references: "
+                + ", ".join(literal_secrets)
+            )
         return cls(
             profile_id, data_center, volume["size_gb"], cpu["image"], gpu_image,
             template_id, tuple(flavors), vcpu_count, idle_timeout, execution_timeout,

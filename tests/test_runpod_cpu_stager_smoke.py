@@ -3,7 +3,8 @@
 from types import SimpleNamespace
 import contextlib
 import io
-import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -14,6 +15,7 @@ from integration.runpod_cpu_stager_smoke import (
     _corrupt_signature,
     _debug_api_call,
     _profile,
+    _secret_from_file_or_prompt,
     _secret_reference,
     run,
 )
@@ -36,6 +38,12 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
     def test_secret_reference_rejects_unsafe_name(self):
         with self.assertRaisesRegex(ValueError, "secret names"):
             _secret_reference("bad secret")
+
+    def test_secret_can_be_read_from_a_file_without_using_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secret.txt"
+            path.write_text("secret-value\n", encoding="utf-8")
+            self.assertEqual(_secret_from_file_or_prompt(str(path), "unused"), "secret-value")
 
     def test_debug_output_redacts_credentials_and_environment_values(self):
         output = io.StringIO()
@@ -75,7 +83,7 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
              patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
              patch("integration.runpod_cpu_stager_smoke.stage_models", new_callable=Mock, return_value={"status": "success", "results": []}) as stage, \
              patch("integration.runpod_cpu_stager_smoke.asyncio.run", side_effect=[CpuStagerError("signature is invalid"), {"status": "success", "results": []}]), \
-             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False):
+             patch("integration.runpod_cpu_stager_smoke._secret_from_file_or_prompt", side_effect=["api", "hmac"]):
             self.assertEqual(run(arguments), 0)
         self.assertIs(adapter.call_args.kwargs["debug"], stage.call_args.kwargs["on_api_call"])
 
@@ -105,7 +113,7 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
              patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
              patch("integration.runpod_cpu_stager_smoke.stage_models", new_callable=Mock) as stage, \
              patch("integration.runpod_cpu_stager_smoke.asyncio.run", side_effect=[CpuStagerError("signature is invalid"), stage_result]), \
-             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False), \
+             patch("integration.runpod_cpu_stager_smoke._secret_from_file_or_prompt", side_effect=["api", "hmac"]), \
              contextlib.redirect_stdout(output):
             self.assertEqual(run(self._live_arguments()), 0)
         self.assertEqual(stage.call_count, 2)
@@ -138,7 +146,7 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
              patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
              patch("integration.runpod_cpu_stager_smoke.stage_models", new_callable=Mock, return_value=stage_result) as stage, \
              patch("integration.runpod_cpu_stager_smoke.asyncio.run", side_effect=[CpuStagerError("signature is invalid"), stage_result]), \
-             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False), \
+             patch("integration.runpod_cpu_stager_smoke._secret_from_file_or_prompt", side_effect=["api", "hmac"]), \
              contextlib.redirect_stdout(output):
             self.assertEqual(run(arguments), 0)
         self.assertEqual(stage.call_count, 2)
@@ -168,7 +176,7 @@ class RunPodCpuStagerSmokeTests(unittest.TestCase):
              patch("integration.runpod_cpu_stager_smoke.SessionLifecycleService", return_value=service), \
              patch("integration.runpod_cpu_stager_smoke.stage_models", new_callable=Mock), \
              patch("integration.runpod_cpu_stager_smoke.asyncio.run", side_effect=[CpuStagerError("signature is invalid"), RuntimeError("stage failed")]), \
-             patch.dict(os.environ, {"RUNPOD_API_KEY": "api", "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY": "hmac"}, clear=False), \
+             patch("integration.runpod_cpu_stager_smoke._secret_from_file_or_prompt", side_effect=["api", "hmac"]), \
              contextlib.redirect_stderr(errors):
             self.assertEqual(run(self._live_arguments()), 1)
         service.end.assert_called_once_with("smoke-test")

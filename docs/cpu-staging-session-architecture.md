@@ -45,9 +45,10 @@ live RunPod operation has been performed.
 
 Implemented next: `coordinator/` persists atomically versioned recipes,
 session bindings, authorization intent, and validated CPU completion records.
-It generates HMAC envelopes from the server-side signing key only after saving
-the exact request. With `managedSessionId`, the route obtains the CPU endpoint
-and signed request from this local state instead of browser settings. Lifecycle
+It generates HMAC envelopes from the key supplied in the current plugin request
+only after saving the exact request; that key is never persisted or returned.
+With `managedSessionId`, the route obtains the CPU endpoint and signed request
+from this local state instead of browser settings. Lifecycle
 adapter calls that create, attach, or delete RunPod resources remain unimplemented.
 
 Implemented next: the coordinator has a versioned managed-profile schema and
@@ -58,7 +59,7 @@ provisioning and resumable closure.
 
 Implemented next: `coordinator/runpod_adapter.py` is a guarded RunPod REST
 implementation. It creates a per-session volume, then a CPU endpoint attached
-to that exact volume, using a server-owned template ID and min/max workers of
+to that exact volume, using the user-supplied profile's template ID and min/max workers of
 zero/one. It verifies the provider responses, records a resource ID plus
 ownership name, re-observes that evidence on recovery, and refuses deletion if
 the evidence no longer matches. Name-only reuse after an uncertain create is
@@ -67,15 +68,13 @@ the adapter is not yet constructed by routes or browser settings, and its tests
 use a fake HTTP transport only; no live RunPod operation is enabled by this
 increment.
 
-Implemented next: `python -m coordinator.managed_sessions` is an
-operator-only CLI for `start`, `status`, `recover`, and `end`. Mutating commands
-require all of `RUNONRUNPOD_MANAGED_LIFECYCLE=enabled`,
-`RUNONRUNPOD_COORDINATOR_ROOT`, `RUNONRUNPOD_MANAGED_PROFILE_PATH`, and a
-server-side `RUNPOD_API_KEY`; the state root must already exist and the profile supplies the trusted CPU template ID
-and cannot be supplied by browser settings. `end` requires an explicit
-`--outputs-retrieved` acknowledgement until durable output retrieval records
-can enforce that condition automatically. The CLI is not registered as a
-ComfyUI request route.
+Implemented next: browser-managed lifecycle actions use the RunPod API key,
+profile JSON, HMAC value, and optional coordinator-state folder supplied in
+the plugin settings. The profile supplies the CPU template ID, but credentials
+inside it must be RunPod stored-secret references rather than literal values.
+No lifecycle environment-variable gate or operator CLI is used. `end`
+requires an explicit `--outputs-retrieved`-equivalent UI acknowledgement until
+durable output retrieval records can enforce that condition automatically.
 
 Implemented next: the existing plugin settings now expose `Model staging mode`.
 The default `gpu` value keeps the main-branch-compatible GPU fetch path even if
@@ -101,16 +100,16 @@ health/version/node checks; the session-owned endpoint is checked through the
 RunPod API for the same volume binding before inference;
 GPU-only mode retains its existing S3 and GPU preparation order. The browser
 now has guarded start/status/recover/end routes and additive sidebar controls.
-They use the plugin's RunPod API key only for the current request while the
-profile, recipe, signing key, state root, images, secret mappings, region, and
-resource sizes remain server-owned. The browser-generated session ID is saved
+They use the plugin's RunPod API key, profile, signing key, recipe, and optional
+state-root setting only for the current request; the HMAC value is not stored in
+coordinator records. The browser-generated session ID is saved
 before creation so a lost response can reconcile the same durable resource
 intent. This established the boundary used by the following lifecycle
 increment.
 
 Implemented next: after CPU artifacts are successfully staged, the lifecycle
 service creates a queue-based, scale-to-zero GPU endpoint from explicit
-operator-owned image, pool, count, disk, timeout, and environment policy. It
+user-selected image, pool, count, disk, timeout, and environment policy. It
 attaches the exact recorded session volume, verifies the effective RunPod v2
 response, journals the endpoint binding, and reconciles it on recovery. CPU
 mode no longer requires or overwrites the browser's GPU-only endpoint setting.
@@ -367,10 +366,13 @@ an assumed API: the currently documented REST resource list covers compute,
 endpoints, volumes, templates, registry authentication, and billing, but does
 not document secret CRUD. Never guess an endpoint or use an undocumented API.
 
-The CPU-stage HMAC key is not a user provider credential. It is a deployment
-authorization secret with the same value in the local coordinator's protected
-configuration and the CPU endpoint's securely injected runtime environment.
-It is never a ComfyUI setting, request field, recipe value, or worker result.
+The CPU-stage HMAC key is not a provider credential. It is a deployment
+authorization secret with the same value in the user's plugin setting and the
+CPU endpoint's securely injected runtime environment. The ComfyUI backend uses
+it only from the current request to sign an envelope, and never writes it to a
+recipe, session record, or worker result. The UI must warn that a remote
+ComfyUI server needs HTTPS: the browser sends this key and the RunPod API key to
+that server.
 
 ### Credential matrix
 
@@ -380,7 +382,7 @@ It is never a ComfyUI setting, request field, recipe value, or worker result.
 | S3 access key and secret | User via ComfyUI plugin | Request-scoped local backend memory | Local backend S3 uploads, downloads, and receipt operations |
 | Hugging Face token | User in RunPod Secrets web UI; optional future plugin-to-documented-secret-API enrollment | RunPod secret injected as `HF_TOKEN` into selected CPU/GPU endpoint | CPU worker in `cpu` mode or GPU worker in `gpu` mode |
 | CivitAI API key | User in RunPod Secrets web UI; optional future plugin-to-documented-secret-API enrollment | RunPod secret injected as `CIVITAI_API_KEY` into selected CPU/GPU endpoint | CPU worker in `cpu` mode or GPU worker in `gpu` mode |
-| CPU staging HMAC key | User/operator provisions matching local and RunPod deployment secret | Protected local coordinator configuration and CPU endpoint runtime secret | Local coordinator signer and CPU worker verifier only |
+| CPU staging HMAC key | User generates it with `tools/generate_hmac_key.py`, then enters it in the plugin and as a RunPod stored secret | Request-scoped ComfyUI backend memory; RunPod secret injected as `STAGING_REQUEST_HMAC_KEY` | Local coordinator signer and CPU worker verifier only |
 | Endpoint IDs, volume IDs, secret reference names | User/profile/coordinator | Non-secret settings and durable session/profile records | Backend and UI display only; never treated as credential values |
 
 ## 6. Durable recipes, runtime records, and storage layout
@@ -545,11 +547,12 @@ Required extensions:
    signed request as authorization for new work.
 
 Provider-token values are supplied only through RunPod's stored-secret and
-runtime-environment mechanism described in section 5. The coordinator may
-select an approved non-secret reference, but browser data cannot inject a token
-value into a job or choose arbitrary worker environment variables. Private
-signing keys remain in the coordinator. Signatures authenticate requests; they
-do not encrypt their payloads.
+runtime-environment mechanism described in section 5. The profile entered in
+the plugin may contain approved non-secret references but cannot contain a
+literal token value or choose arbitrary credential environment values. The HMAC
+value is supplied separately in the plugin settings, used only by the current
+ComfyUI backend request, and never returned or persisted. Signatures
+authenticate requests; they do not encrypt their payloads.
 
 ### Mode-specific execution
 
@@ -651,13 +654,13 @@ their main-branch workflow without creating a CPU helper. Do not redesign the
 sidebar or remove controls. Byte-for-byte preservation is not a goal if it
 would leave stale IDs or block backend-managed configuration.
 
-The guarded companion CLI remains available for operator recovery and continues
-to use an environment-supplied `RUNPOD_API_KEY`. Browser lifecycle actions use
-the user's request-scoped plugin API key instead; the key is placed only in the
-short-lived provider adapter and is never written to coordinator state. CPU-mode
-creation requires an explicitly configured managed profile and recipe plus the
-user's Start / Recover action. End Session is an explicit destructive action
-with an output-retention acknowledgement.
+Browser lifecycle actions use the user's request-scoped plugin API key; it is
+placed only in the short-lived provider adapter and is never written to
+coordinator state. CPU-mode creation requires an explicitly configured managed
+profile, HMAC key, and recipe plus the user's Start / Recover action. End
+Session is an explicit destructive action with an output-retention
+acknowledgement. There is no environment-variable or companion-CLI authority
+path for normal managed-session use.
 
 In CPU-managed mode, the selected profile is authoritative for resources. All
 submit, verify, cancel, recover, and clean routes resolve the same backend
@@ -850,10 +853,9 @@ Progress: local model target/binding compilation, immutable local/remote
 materialization, volume readiness receipts, and a signed CPU-stage contract
 with a thin CPU image are implemented. Durable recipe/session records, local
 request authorization, a fakeable lifecycle core, and a guarded, hermetically
-tested RunPod REST lifecycle adapter are implemented. An operator-only,
-environment-gated CLI and guarded browser routes now wire that adapter. Browser
-mutations use a request-scoped plugin API key while operator policy remains in
-server-owned configuration. The UI/backend staging-mode contract is implemented
+tested RunPod REST lifecycle adapter are implemented. Guarded browser routes
+wire that adapter using request-scoped UI configuration and no environment
+variables. The UI/backend staging-mode contract is implemented
 with GPU compatibility as its default. Managed GPU endpoint provisioning after
 successful CPU staging is implemented. Durable upload/output ledgers,
 automatic recipe capture/restoration, and a deployed CPU endpoint remain
@@ -892,8 +894,8 @@ its existing S3-backed behavior.
 
 - Implement the RunPod adapter with exact ownership evidence.
 - Add operation journaling and connect atomic state persistence.
-- Replace the interim CLI environment API key with a request-scoped user-plugin
-  credential handoff and existing-settings synchronization.
+- Accept request-scoped user-plugin lifecycle configuration and synchronize it
+  with the existing settings UI, without environment-variable authority.
 - Reconstruct fresh resources from recipes without manual resource-ID edits.
 
 Progress: guarded browser start/status/recover/end operations now create and

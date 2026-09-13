@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
-import os
 from pathlib import Path
 import re
 import sys
@@ -40,10 +40,17 @@ def _secret_reference(name: str) -> str:
     return f"{{{{ RUNPOD_SECRET_{name} }}}}"
 
 
-def _environment_value(name: str) -> str:
-    value = os.environ.get(name)
+def _secret_from_file_or_prompt(path: str | None, prompt: str) -> str:
+    """Read a local secret file or prompt without exposing it in shell history."""
+    if path:
+        try:
+            value = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise ValueError(f"could not read secret file {path}: {error}") from None
+    else:
+        value = getpass.getpass(prompt)
     if not value:
-        raise ValueError(f"environment variable {name} is required")
+        raise ValueError("a non-empty secret value is required")
     return value
 
 
@@ -93,8 +100,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="required acknowledgement of billable provider operations")
     parser.add_argument("--pause-after-create", action="store_true", help="wait for Enter after creation before staging and cleanup")
     parser.add_argument("--debug", action="store_true", help="log redacted RunPod API requests and results to stderr")
-    parser.add_argument("--api-key-env", default="RUNPOD_API_KEY", help="environment variable holding the RunPod API key")
-    parser.add_argument("--signing-key-env", default="RUNONRUNPOD_CPU_STAGING_SIGNING_KEY", help="environment variable holding the CPU HMAC value")
+    parser.add_argument("--api-key-file", help="file containing the RunPod API key; otherwise prompt securely")
+    parser.add_argument("--signing-key-file", help="file containing the CPU HMAC key; otherwise prompt securely")
     parser.add_argument("--data-center", required=True, help="RunPod data-center ID for volume and CPU endpoint")
     parser.add_argument("--cpu-template-id", required=True, help="preconfigured worker-cpu Serverless template ID")
     parser.add_argument("--cpu-image", required=True, help="immutable worker-cpu image reference recorded in the profile")
@@ -177,8 +184,8 @@ def _safe_summary(session: dict[str, object]) -> dict[str, object]:
 
 def run(argv: Sequence[str] | None = None) -> int:
     arguments = _arguments(argv)
-    api_key = _environment_value(arguments.api_key_env)
-    signing_key = _environment_value(arguments.signing_key_env)
+    api_key = _secret_from_file_or_prompt(arguments.api_key_file, "RunPod API key: ")
+    signing_key = _secret_from_file_or_prompt(arguments.signing_key_file, "CPU staging HMAC key: ")
     session_id = f"smoke-{uuid.uuid4().hex[:20]}"
     temporary_root: tempfile.TemporaryDirectory[str] | None = None
     if arguments.state_root:

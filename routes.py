@@ -43,9 +43,9 @@ from .coordinator import (
     LifecycleError,
     ManagedSessionConfigError,
     SessionCoordinator,
-    lifecycle_from_request,
-    managed_configuration_from_environment,
-    managed_recipe_from_environment,
+    lifecycle_from_settings,
+    managed_configuration_from_settings,
+    signing_key_from_settings,
     validate_v2_gpu_profile,
 )
 
@@ -77,7 +77,6 @@ PROTOCOL_VERSION = 2
 STAGING_MODE_GPU = "gpu"
 STAGING_MODE_CPU = "cpu"
 _STAGING_MODES = {STAGING_MODE_GPU, STAGING_MODE_CPU}
-MANAGED_SIGNING_KEY_ENV = "RUNONRUNPOD_CPU_STAGING_SIGNING_KEY"
 
 
 # In-memory state for active jobs: {job_id: asyncio.Task}
@@ -468,15 +467,11 @@ def _managed_lifecycle_for_settings(
     require_signing_key: bool,
     require_gpu_profile: bool = True,
 ):
-    api_key = settings.get("apiKey") if isinstance(settings, dict) else None
-    service, profile = lifecycle_from_request(api_key, os.environ)
+    service, profile, recipe_id = lifecycle_from_settings(settings)
     if require_gpu_profile:
         validate_v2_gpu_profile(profile)
-    recipe_id = managed_recipe_from_environment(service.coordinator, os.environ)
-    if require_signing_key and not os.environ.get(MANAGED_SIGNING_KEY_ENV):
-        raise ManagedSessionConfigError(
-            f"{MANAGED_SIGNING_KEY_ENV} is required for managed CPU staging"
-        )
+    if require_signing_key:
+        signing_key_from_settings(settings)
     return service, profile, recipe_id
 
 
@@ -486,7 +481,7 @@ def _managed_gpu_endpoint_id(settings: dict) -> str:
     if not isinstance(session_id, str) or not session_id:
         raise _SubmitError("CPU managed staging requires an active managed session")
     try:
-        coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
+        coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
         session = coordinator.get_session(session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
     except (CoordinatorError, LifecycleError) as error:
@@ -543,15 +538,14 @@ def _managed_session_is_active(session_id: str) -> bool:
     )
 
 
-@routes.get("/RunOnRunpod/managed-session/config")
-async def managed_session_config(_request):
-    """Expose only non-secret, operator-owned lifecycle configuration."""
+@routes.post("/RunOnRunpod/managed-session/config")
+async def managed_session_config(request):
+    """Validate UI-managed lifecycle configuration without returning secrets."""
+    data = await request.json()
+    settings = data.get("settings", {})
     try:
-        _coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
-        if not os.environ.get(MANAGED_SIGNING_KEY_ENV):
-            raise ManagedSessionConfigError(
-                f"{MANAGED_SIGNING_KEY_ENV} is required for managed CPU staging"
-            )
+        _coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
+        signing_key_from_settings(settings)
     except (CoordinatorError, LifecycleError) as error:
         return web.json_response({"configured": False, "error": str(error)})
     return web.json_response({
@@ -597,11 +591,12 @@ async def start_managed_session(request):
 async def managed_session_status(request):
     """Read the configured session's durable local state without provider I/O."""
     data = await request.json()
+    settings = data.get("settings", {})
     session_id = data.get("session_id")
     try:
         if not isinstance(session_id, str) or not session_id:
             raise ManagedSessionConfigError("managed session status requires a session ID")
-        coordinator, profile, recipe_id = managed_configuration_from_environment(os.environ)
+        coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
         session = coordinator.get_session(session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
     except (CoordinatorError, LifecycleError) as error:
@@ -665,6 +660,10 @@ def _validate_settings(settings: dict, staging_mode: str | None = None) -> None:
     if not settings.get("apiKey"):
         raise _SubmitError("RunPod API Key is required")
     if mode == STAGING_MODE_CPU:
+        if not settings.get("managedProfile"):
+            raise _SubmitError("CPU managed staging requires a managed profile JSON")
+        if not settings.get("managedSigningKey"):
+            raise _SubmitError("CPU managed staging requires the CPU staging HMAC key")
         if not settings.get("managedSessionId"):
             raise _SubmitError("CPU managed staging requires an active managed session")
     elif not settings.get("endpointId"):
@@ -999,7 +998,7 @@ class _CpuStagerOperation:
 
 @dataclass(frozen=True)
 class _CpuArtifactOperation:
-    """Server-only authority for CPU-volume artifact transfer."""
+    """Request-scoped authority for CPU-volume artifact transfer."""
 
     endpoint_id: str
     volume_binding: str
@@ -1009,21 +1008,16 @@ class _CpuArtifactOperation:
 
 
 def _managed_cpu_artifact_operation(settings: dict) -> _CpuArtifactOperation:
-    """Resolve a CPU session without accepting signing material from UI data."""
+    """Resolve CPU transfer authority from the current UI configuration."""
     managed_session_id = settings.get("managedSessionId")
-    state_root = os.environ.get("RUNONRUNPOD_COORDINATOR_ROOT")
-    signing_key = os.environ.get("RUNONRUNPOD_CPU_STAGING_SIGNING_KEY")
     if not isinstance(managed_session_id, str) or not managed_session_id:
         raise _SubmitError("CPU managed staging requires an active managed session")
-    if not state_root or not signing_key:
-        raise _SubmitError(
-            "Managed CPU staging is not configured on this ComfyUI server",
-            log="managed CPU staging needs RUNONRUNPOD_COORDINATOR_ROOT and signing key",
-        )
-    coordinator = SessionCoordinator(state_root)
     try:
+        coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
+        signing_key = signing_key_from_settings(settings)
         session = coordinator.get_session(managed_session_id)
-    except CoordinatorError as error:
+        _assert_configured_session(session, profile.profile_id, recipe_id)
+    except (CoordinatorError, LifecycleError) as error:
         raise _SubmitError(
             f"Managed CPU staging could not be authorized: {error}",
             log=f"managed CPU coordinator: {error}",
@@ -1045,9 +1039,10 @@ def _cpu_stager_request(
 ) -> _CpuStagerOperation | None:
     """Return a coordinator-signed CPU request only when fully configured.
 
-    The browser settings deliberately do not contain the signing key. A future
-    coordinator supplies the opaque envelope, which is checked here against the
-    exact local materialization before it can replace the legacy GPU fetch.
+    In managed mode the HMAC key is present only in this current backend request
+    and is never persisted or returned. The coordinator supplies an opaque
+    envelope, checked here against exact local materialization before it can
+    replace the legacy GPU fetch.
     """
     if _staging_mode(settings) == STAGING_MODE_GPU:
         return None

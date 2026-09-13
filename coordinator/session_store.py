@@ -227,6 +227,10 @@ class SessionCoordinator:
         """Read a durable recipe without exposing its filesystem location."""
         return _read_json(self._recipe_path(_id(recipe_id, "recipe ID")))
 
+    def recipe_exists(self, recipe_id: str) -> bool:
+        """Check for a recipe after applying the ordinary identifier validation."""
+        return self._recipe_path(_id(recipe_id, "recipe ID")).is_file()
+
     def create_provisioning_session(
         self,
         recipe_id: str,

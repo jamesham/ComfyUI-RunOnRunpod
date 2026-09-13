@@ -311,6 +311,10 @@ function getSettings() {
         downloadModelsFromTheSource: app.extensionManager.setting.get("Run on Runpod.Job.downloadModelsFromTheSource") ?? false,
         stagingMode: app.extensionManager.setting.get("Run on Runpod.Job.stagingMode") || "gpu",
         managedSessionId: app.extensionManager.setting.get("Run on Runpod.Serverless.managedSessionId") || "",
+        managedProfile: app.extensionManager.setting.get("Run on Runpod.Serverless.managedProfile") || "",
+        managedRecipeId: app.extensionManager.setting.get("Run on Runpod.Serverless.managedRecipeId") || "default",
+        managedStateRoot: app.extensionManager.setting.get("Run on Runpod.Serverless.managedStateRoot") || "",
+        managedSigningKey: app.extensionManager.setting.get("Run on Runpod.Keys.cpuStagingHmacKey") || "",
         civitaiApiKey: app.extensionManager.setting.get("Run on Runpod.Keys.civitaiApiKey") || "",
         hfToken: app.extensionManager.setting.get("Run on Runpod.Keys.hfToken") || "",
     };
@@ -537,6 +541,8 @@ function renderJobList() {
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
     if (s.stagingMode === "cpu") {
+        if (!s.managedProfile) missing.push("CPU Managed Profile JSON");
+        if (!s.managedSigningKey) missing.push("CPU Staging HMAC Key");
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
         if (!s.endpointId) missing.push("Endpoint ID");
@@ -569,6 +575,8 @@ async function submitJob() {
     const missing = [];
     if (!s.apiKey) missing.push("API Key");
     if (s.stagingMode === "cpu") {
+        if (!s.managedProfile) missing.push("CPU Managed Profile JSON");
+        if (!s.managedSigningKey) missing.push("CPU Staging HMAC Key");
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
         if (!s.endpointId) missing.push("Endpoint ID");
@@ -712,7 +720,10 @@ async function refreshManagedSessionStatus() {
     if (settings.stagingMode !== "cpu") return;
 
     try {
-        const configResponse = await api.fetchApi("/RunOnRunpod/managed-session/config");
+        const configResponse = await api.fetchApi("/RunOnRunpod/managed-session/config", {
+            method: "POST",
+            body: JSON.stringify({ settings }),
+        });
         const config = await configResponse.json();
         if (!config.configured) {
             _renderManagedSession(null, config.error || "server lifecycle is not configured");
@@ -726,7 +737,7 @@ async function refreshManagedSessionStatus() {
         }
         const response = await api.fetchApi("/RunOnRunpod/managed-session/status", {
             method: "POST",
-            body: JSON.stringify({ session_id: settings.managedSessionId }),
+            body: JSON.stringify({ settings, session_id: settings.managedSessionId }),
         });
         const data = await response.json();
         if (data.error) {
@@ -748,6 +759,10 @@ async function startManagedSession(btn) {
     }
     if (!settings.apiKey) {
         alert("A RunPod API Key is required to create managed resources.");
+        return;
+    }
+    if (!settings.managedProfile || !settings.managedSigningKey) {
+        alert("CPU managed staging requires the managed profile JSON and CPU staging HMAC key.");
         return;
     }
 
@@ -1430,6 +1445,14 @@ app.registerExtension({
             defaultValue: true,
         },
         {
+            id: "Run on Runpod.Storage.cpuManagedStagingNotice",
+            name: "CPU managed staging",
+            type: "text",
+            defaultValue: "S3 connection settings are not used in CPU managed staging mode.",
+            attrs: { readonly: true },
+            tooltip: "CPU managed staging transfers models, workflow inputs, and outputs through the managed CPU endpoint and temporary network volume. Endpoint URL, Region, Bucket Name, S3 Access Key, and S3 Secret Key are ignored. The cleanup options below still apply.",
+        },
+        {
             id: "Run on Runpod.Storage.deleteOutputsAfterJob",
             name: "Delete output files from network volume after job finishes",
             type: "boolean",
@@ -1460,6 +1483,22 @@ app.registerExtension({
                 { text: "Ask each time", value: "ask" },
             ],
             tooltip: "What happens when you click the X on a finished job card. 'Delete' removes the local output files (and any folder that becomes empty). 'Keep' only removes the card. 'Ask' shows a confirmation every time, even for single-file jobs.",
+        },
+        {
+            id: "Run on Runpod.Keys.transportWarning",
+            name: "Credential transport warning",
+            type: "text",
+            defaultValue: "Credentials are sent to the ComfyUI server. Use HTTPS when it is remote.",
+            attrs: { readonly: true },
+            tooltip: "RunPod API keys, S3 credentials, provider credentials used by GPU-only mode, and the CPU staging HMAC key are sent from this browser to the ComfyUI server. A remote ComfyUI server without HTTPS can expose them in transit.",
+        },
+        {
+            id: "Run on Runpod.Keys.cpuStagingHmacKey",
+            name: "CPU staging HMAC key",
+            type: "text",
+            defaultValue: "",
+            attrs: { type: "password" },
+            tooltip: "The local copy of the CPU staging HMAC key. Create the same value as a RunPod stored secret mapped to STAGING_REQUEST_HMAC_KEY in the managed profile. See docs/cpu-staging-hmac-key.md.",
         },
         {
             id: "Run on Runpod.Keys.hfToken",
@@ -1514,6 +1553,27 @@ app.registerExtension({
             name: "Bucket Name",
             type: "text",
             defaultValue: "",
+        },
+        {
+            id: "Run on Runpod.Serverless.managedProfile",
+            name: "CPU managed profile JSON",
+            type: "text",
+            defaultValue: "",
+            tooltip: "Required for CPU managed staging. Paste the non-secret profile JSON that defines the CPU template, GPU image/pools, data center, volume size, and RunPod stored-secret references. See README.md.",
+        },
+        {
+            id: "Run on Runpod.Serverless.managedRecipeId",
+            name: "CPU managed recipe ID",
+            type: "text",
+            defaultValue: "default",
+            tooltip: "A local working-set recipe name. The plugin initializes it on first use; it never contains credentials or RunPod resource IDs.",
+        },
+        {
+            id: "Run on Runpod.Serverless.managedStateRoot",
+            name: "CPU managed state folder",
+            type: "text",
+            defaultValue: "",
+            tooltip: "Optional folder on the ComfyUI server for durable managed-session records. Leave blank to use the plugin's .runonrunpod folder. This is a server filesystem path, not a path on a remote browser computer.",
         },
         {
             id: "Run on Runpod.Serverless.endpointId",

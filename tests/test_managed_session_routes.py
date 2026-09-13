@@ -129,7 +129,7 @@ class ManagedSessionRouteTests(unittest.IsolatedAsyncioTestCase):
         }
         self.coordinator.get_session.return_value = managed
         with patch.object(
-            self.routes, "managed_configuration_from_environment",
+            self.routes, "managed_configuration_from_settings",
             return_value=(self.coordinator, self.profile, "recipe-1"),
         ):
             endpoint_id = self.routes._endpoint_id_for_settings({
@@ -178,19 +178,18 @@ class ManagedSessionRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("does not belong", result["error"])
         self.service.end.assert_not_called()
 
-    async def test_config_response_contains_no_environment_or_secret_material(self):
+    async def test_config_response_contains_no_secret_material(self):
         profile = SimpleNamespace(
             profile_id="profile-1", data_center="dc-1", volume_size_gb=20,
         )
         with patch.object(
-            self.routes, "managed_configuration_from_environment",
+            self.routes, "managed_configuration_from_settings",
             return_value=(self.coordinator, profile, "recipe-1"),
-        ), patch.dict(
-            self.routes.os.environ,
-            {self.routes.MANAGED_SIGNING_KEY_ENV: "do-not-return-this"},
-            clear=False,
+        ), patch.object(
+            self.routes, "signing_key_from_settings",
+            return_value="do-not-return-this",
         ):
-            result = await self.routes.managed_session_config(None)
+            result = await self.routes.managed_session_config(Request({"settings": self.settings}))
 
         self.assertTrue(result["configured"])
         self.assertEqual(result["dataCenter"], "dc-1")

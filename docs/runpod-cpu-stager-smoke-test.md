@@ -32,8 +32,8 @@ unchanged.
 ## Preconditions
 
 - A RunPod API key with authority to create/delete a network volume and CPU
-  Serverless endpoint is available in a local environment variable. Do not put
-  it on the command line.
+  Serverless endpoint. The harness securely prompts for it unless
+  `--api-key-file` is supplied; do not put it on the command line.
 - Run the harness in the same Python environment as ComfyUI, or install its
   `aiohttp` transport dependency before invoking `--live`.
 - A CPU Serverless template already points to an image built from
@@ -42,8 +42,8 @@ unchanged.
   that flavor. Obtain valid IDs and limits from RunPod's v2 CPU catalog; the
   harness passes these as the endpoint's explicit CPU configuration.
 - In the RunPod administrative UI, create two stored secrets:
-  - an HMAC secret whose value also exists locally in the environment variable
-    named by `--signing-key-env`;
+  - an HMAC secret whose value is also supplied to the harness by its secure
+    prompt or `--signing-key-file`;
   - a valid Hugging Face or CivitAI token, selected by `--provider`.
 - The template/endpoint configuration accepts stored-secret references in the
   Serverless `env` mapping. This harness uses the project assumption that the
@@ -65,9 +65,6 @@ Run from the repository root. Replace every placeholder with values for the
 user's account and CPU staging template:
 
 ```sh
-export RUNPOD_API_KEY='...'
-export RUNONRUNPOD_CPU_STAGING_SIGNING_KEY='...'
-
 python -m integration.runpod_cpu_stager_smoke \
   --live \
   --data-center '<RUNPOD_DATA_CENTER>' \
@@ -82,6 +79,12 @@ python -m integration.runpod_cpu_stager_smoke \
   --sha256 '<64_HEX_SHA256>' \
   --size '<BYTE_SIZE>'
 ```
+
+The command prompts without echo for the RunPod API key and CPU staging HMAC
+key. For unattended use, pass `--api-key-file <path>` and
+`--signing-key-file <path>`; each file must contain only its value and should
+be protected by the local operating system. Generate the HMAC key using the
+[CPU staging HMAC key guide](cpu-staging-hmac-key.md).
 
 Add `--pause-after-create` to stop immediately after the CPU endpoint and
 volume are created. Inspect their compute type, min/max worker counts, shared

@@ -20,9 +20,9 @@ requires its separately configured coordinator and CPU endpoint; it never falls
 back to GPU downloads. In CPU mode, model/input installation and output
 retrieval use signed, bounded HTTPS jobs against the CPU endpoint, so the
 selected session does not require RunPod S3 credentials. The sidebar can start,
-inspect, recover, and end a managed session when the ComfyUI server has an
-operator-owned lifecycle profile and recipe. The RunPod API key is handed to
-the backend only with the request; it is not written into coordinator records.
+inspect, recover, and end a managed session from the user's RunPod settings.
+The RunPod API key and CPU HMAC key are handed to the backend only with the
+request; neither is written into coordinator records.
 
 The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image,
 signed model-staging contract, and signed artifact-transfer contract for the CPU
@@ -31,28 +31,37 @@ submissions keep their current GPU worker behavior until a session coordinator
 provides a matching signed request.
 
 `coordinator/` provides the local durable record core for recipes and managed
-sessions, plus a guarded RunPod REST lifecycle adapter. The adapter targets
-network-volume and CPU-endpoint creation. Both the sidebar bridge and the
-operator-only `python -m coordinator.managed_sessions` CLI reject mutations
-unless `RUNONRUNPOD_MANAGED_LIFECYCLE=enabled`, a local existing state root,
-and an operator-owned profile file are configured. The CLI reads
-`RUNPOD_API_KEY` from the server environment; sidebar requests instead use the
-API key already supplied in the plugin settings without persisting it in the
-coordinator. Hermetic tests cover the documented
+sessions, plus a RunPod REST lifecycle adapter. The adapter targets
+network-volume and CPU-endpoint creation. In CPU-managed mode, lifecycle
+mutations are authorized by the RunPod API key supplied through the plugin UI;
+there is no server environment-variable opt-in or operator CLI. The state root
+defaults to `.runonrunpod` beside this plugin, and can be changed in the UI.
+Hermetic tests cover the documented
 [network-volume API](https://docs.runpod.io/api-reference/network-volumes/POST/networkvolumes)
 and [endpoint API](https://docs.runpod.io/api-reference/endpoints/POST/endpoints)
 shapes without making provider calls. Ordinary submissions therefore retain
 their existing GPU-worker behavior in this release.
 
-For sidebar-managed CPU sessions, configure these server environment values
-before starting ComfyUI:
+For sidebar-managed CPU sessions, use **Settings → Run on Runpod** to enter:
 
-- `RUNONRUNPOD_MANAGED_LIFECYCLE=enabled`
-- `RUNONRUNPOD_COORDINATOR_ROOT` — an existing local state directory
-- `RUNONRUNPOD_MANAGED_PROFILE_PATH` — the operator-owned profile JSON
-- `RUNONRUNPOD_MANAGED_RECIPE_ID` — an existing recipe in the coordinator root
-- `RUNONRUNPOD_CPU_STAGING_SIGNING_KEY` — the local HMAC value corresponding to
-  the CPU template's stored-secret mapping
+- RunPod API key
+- CPU staging HMAC key
+- managed profile JSON (the CPU image/template, GPU policy, volume size, and
+  RunPod stored-secret *references*)
+- an optional recipe ID and local coordinator-state folder
+
+The profile must use RunPod stored-secret references for `STAGING_REQUEST_HMAC_KEY`
+and CPU provider tokens; literal credential values are rejected. Follow the
+[CPU staging HMAC key guide](docs/cpu-staging-hmac-key.md) to generate the HMAC
+key and configure its matching RunPod secret. The settings UI warns that these
+credentials are sent to the ComfyUI server: use HTTPS whenever that server is
+remote, because an HTTP connection does not protect them in transit.
+
+Generate the HMAC value with the included cross-platform script before creating
+its RunPod stored secret: `python3 tools/generate_hmac_key.py` on macOS/Linux,
+`py tools\generate_hmac_key.py` on Windows, or ComfyUI portable's
+`python_embeded\python.exe tools\generate_hmac_key.py`. The complete setup is
+in the [CPU staging HMAC key guide](docs/cpu-staging-hmac-key.md).
 
 The sidebar's **Start / Recover Session** action persists its generated session
 ID before creating the volume and CPU endpoint, making a retry reconcile the
@@ -101,11 +110,6 @@ for browser-managed CPU sessions. For example:
 Provider credentials belong only in the CPU environment for CPU-managed mode;
 the profile validator rejects `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, and
 `CIVITAI_API_KEY` in its GPU environment.
-
-The management CLI remains available for operator recovery. `start` and
-`recover` use the profile chosen by the server environment; `status` reads only
-the durable local record. `end` additionally requires `--outputs-retrieved`
-until a durable output-retrieval ledger is connected.
 
 ![Run on Runpod panel](panel.png)
 
