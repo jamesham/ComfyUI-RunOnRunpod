@@ -36,7 +36,7 @@ from .cpu_artifact_client import (
 from .cpu_staging_contract import (
     CpuStagingContractError,
     stage_request_from_downloads,
-    unsigned_stage_payload,
+    validate_stage_request,
 )
 from .coordinator import (
     CoordinatorError,
@@ -45,7 +45,6 @@ from .coordinator import (
     SessionCoordinator,
     lifecycle_from_settings,
     managed_configuration_from_settings,
-    signing_key_from_settings,
     validate_v2_gpu_profile,
 )
 
@@ -464,14 +463,11 @@ def _assert_configured_session(
 def _managed_lifecycle_for_settings(
     settings: dict,
     *,
-    require_signing_key: bool,
     require_gpu_profile: bool = True,
 ):
     service, profile, recipe_id = lifecycle_from_settings(settings)
     if require_gpu_profile:
         validate_v2_gpu_profile(profile)
-    if require_signing_key:
-        signing_key_from_settings(settings)
     return service, profile, recipe_id
 
 
@@ -509,7 +505,7 @@ async def _ensure_managed_gpu_endpoint(
     """Cross the CPU-ready boundary by creating/reconciling the GPU endpoint."""
     try:
         service, profile, recipe_id = _managed_lifecycle_for_settings(
-            settings, require_signing_key=True,
+            settings,
         )
         session = service.coordinator.get_session(operation.session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
@@ -545,7 +541,6 @@ async def managed_session_config(request):
     settings = data.get("settings", {})
     try:
         _coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
-        signing_key_from_settings(settings)
     except (CoordinatorError, LifecycleError) as error:
         return web.json_response({"configured": False, "error": str(error)})
     return web.json_response({
@@ -569,7 +564,7 @@ async def start_managed_session(request):
         if not isinstance(session_id, str) or not session_id:
             raise ManagedSessionConfigError("managed session start requires a session ID")
         service, profile, recipe_id = _managed_lifecycle_for_settings(
-            settings, require_signing_key=True,
+            settings,
         )
         if service.coordinator.session_exists(session_id):
             existing = service.coordinator.get_session(session_id)
@@ -614,7 +609,7 @@ async def recover_managed_session(request):
         if not isinstance(session_id, str) or not session_id:
             raise ManagedSessionConfigError("managed session recovery requires a session ID")
         service, profile, recipe_id = _managed_lifecycle_for_settings(
-            settings, require_signing_key=True,
+            settings,
         )
         session = service.coordinator.get_session(session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
@@ -643,7 +638,7 @@ async def end_managed_session(request):
                 "managed session still has an active preparation or workflow job"
             )
         service, profile, recipe_id = _managed_lifecycle_for_settings(
-            settings, require_signing_key=False, require_gpu_profile=False,
+            settings, require_gpu_profile=False,
         )
         session = service.coordinator.get_session(session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
@@ -662,8 +657,6 @@ def _validate_settings(settings: dict, staging_mode: str | None = None) -> None:
     if mode == STAGING_MODE_CPU:
         if not settings.get("managedProfile"):
             raise _SubmitError("CPU managed staging requires a managed profile JSON")
-        if not settings.get("managedSigningKey"):
-            raise _SubmitError("CPU managed staging requires the CPU staging HMAC key")
         if not settings.get("managedSessionId"):
             raise _SubmitError("CPU managed staging requires an active managed session")
     elif not settings.get("endpointId"):
@@ -991,7 +984,7 @@ def _make_progress_emitter(prep_id: str, planned_order: list[str], model_status:
 @dataclass(frozen=True)
 class _CpuStagerOperation:
     endpoint_id: str
-    signed_request: object
+    stage_request: object
     coordinator: SessionCoordinator | None = None
     session_id: str | None = None
 
@@ -1002,7 +995,6 @@ class _CpuArtifactOperation:
 
     endpoint_id: str
     volume_binding: str
-    signing_key: str
     coordinator: SessionCoordinator
     session_id: str
 
@@ -1014,12 +1006,11 @@ def _managed_cpu_artifact_operation(settings: dict) -> _CpuArtifactOperation:
         raise _SubmitError("CPU managed staging requires an active managed session")
     try:
         coordinator, profile, recipe_id = managed_configuration_from_settings(settings)
-        signing_key = signing_key_from_settings(settings)
         session = coordinator.get_session(managed_session_id)
         _assert_configured_session(session, profile.profile_id, recipe_id)
     except (CoordinatorError, LifecycleError) as error:
         raise _SubmitError(
-            f"Managed CPU staging could not be authorized: {error}",
+            f"Managed CPU staging could not be prepared: {error}",
             log=f"managed CPU coordinator: {error}",
         ) from None
     bindings = session.get("bindings")
@@ -1029,7 +1020,7 @@ def _managed_cpu_artifact_operation(settings: dict) -> _CpuArtifactOperation:
         raise _SubmitError("Managed session has no CPU staging endpoint")
     if not isinstance(volume_binding, str) or not volume_binding:
         raise _SubmitError("Managed session has no CPU volume binding")
-    return _CpuArtifactOperation(endpoint_id, volume_binding, signing_key, coordinator, managed_session_id)
+    return _CpuArtifactOperation(endpoint_id, volume_binding, coordinator, managed_session_id)
 
 
 def _cpu_stager_request(
@@ -1037,42 +1028,36 @@ def _cpu_stager_request(
     preparation: "_ModelPreparation",
     prep_id: str,
 ) -> _CpuStagerOperation | None:
-    """Return a coordinator-signed CPU request only when fully configured.
-
-    In managed mode the HMAC key is present only in this current backend request
-    and is never persisted or returned. The coordinator supplies an opaque
-    envelope, checked here against exact local materialization before it can
-    replace the legacy GPU fetch.
-    """
+    """Return a validated CPU request only when fully configured."""
     if _staging_mode(settings) == STAGING_MODE_GPU:
         return None
 
     if settings.get("managedSessionId"):
         managed = _managed_cpu_artifact_operation(settings)
         try:
-            envelope = managed.coordinator.authorize_stage(
-                managed.session_id, prep_id, preparation.worker_downloads, managed.signing_key,
+            request = managed.coordinator.prepare_stage_request(
+                managed.session_id, prep_id, preparation.worker_downloads,
             )
         except CoordinatorError as error:
             raise _SubmitError(
-                f"Managed CPU staging could not be authorized: {error}",
+                f"Managed CPU staging could not be prepared: {error}",
                 log=f"managed CPU coordinator: {error}",
             ) from None
         return _CpuStagerOperation(
-            managed.endpoint_id, envelope, managed.coordinator, managed.session_id,
+            managed.endpoint_id, request, managed.coordinator, managed.session_id,
         )
 
     endpoint_id = settings.get("cpuStagerEndpointId")
-    envelope = settings.get("cpuStagerSignedRequest")
-    if not endpoint_id and not envelope:
-        raise _SubmitError("CPU managed staging requires an endpoint ID and signed coordinator request")
-    if not isinstance(endpoint_id, str) or not endpoint_id or envelope is None:
-        raise _SubmitError("CPU staging requires an endpoint ID and signed coordinator request")
+    request = settings.get("cpuStagerRequest")
+    if not endpoint_id and not request:
+        raise _SubmitError("CPU managed staging requires an endpoint ID and coordinator request")
+    if not isinstance(endpoint_id, str) or not endpoint_id or request is None:
+        raise _SubmitError("CPU staging requires an endpoint ID and coordinator request")
     try:
         expected = stage_request_from_downloads(
             prep_id, settings.get("cpuStagerVolumeBinding", ""), preparation.worker_downloads,
         )
-        supplied = unsigned_stage_payload(envelope)
+        supplied = validate_stage_request(request)
     except CpuStagingContractError as error:
         raise _SubmitError(
             "CPU staging request is invalid", log=f"CPU staging contract rejected request: {error}",
@@ -1080,9 +1065,9 @@ def _cpu_stager_request(
     if supplied != expected:
         raise _SubmitError(
             "CPU staging request does not match this workflow's verified model plan",
-            log="CPU staging signed payload differs from local materialization",
+            log="CPU staging request differs from local materialization",
         )
-    return _CpuStagerOperation(endpoint_id, envelope)
+    return _CpuStagerOperation(endpoint_id, supplied)
 
 
 async def _run_worker_fetches(
@@ -1344,7 +1329,7 @@ async def _upload_cpu_input_files(
         _send_event("progress", {"prep_id": prep_id, "message": f"Installing input: {filename}"})
         try:
             await upload_cpu_artifact(
-                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.endpoint_id, settings["apiKey"],
                 operation.volume_binding, _artifact_operation_id(prep_id, "input", target_path),
                 target_path, source_path,
             )
@@ -1384,7 +1369,7 @@ async def _execute_cpu_model_preparation(
 
         try:
             result = await stage_models_on_cpu(
-                cpu_stage.endpoint_id, settings["apiKey"], cpu_stage.signed_request, _on_cpu_progress,
+                cpu_stage.endpoint_id, settings["apiKey"], cpu_stage.stage_request, _on_cpu_progress,
             )
         except (CpuStagerError, CoordinatorError) as error:
             raise _SubmitError(f"CPU model staging failed: {error}", log=f"CPU stager: {error}") from None
@@ -1399,7 +1384,7 @@ async def _execute_cpu_model_preparation(
         _send_event("progress", {"prep_id": prep_id, "message": f"Installing model: {filename}"})
         try:
             result = await upload_cpu_artifact(
-                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.endpoint_id, settings["apiKey"],
                 operation.volume_binding, _artifact_operation_id(prep_id, "model", target_path),
                 target_path, source_path,
             )
@@ -1414,7 +1399,7 @@ async def _execute_cpu_model_preparation(
         emit_progress("CPU staging models")
 
     # A stage result covers only provider downloads. Do not mark a managed
-    # session ready until the separate signed upload-install contract also has
+    # session ready until the separate upload-install contract also has
     # a durable completion record; leaving it preparing is the safe state for
     # mixed remote/local content until that ledger is implemented.
     if preparation.worker_downloads and not preparation.upload_queue:
@@ -1471,7 +1456,7 @@ async def _execute_model_preparation(
 
             try:
                 cpu_result = await stage_models_on_cpu(
-                    cpu_stage.endpoint_id, api_key, cpu_stage.signed_request, _on_cpu_progress,
+                    cpu_stage.endpoint_id, api_key, cpu_stage.stage_request, _on_cpu_progress,
                 )
             except CpuStagerError as error:
                 raise _SubmitError(
@@ -1786,7 +1771,7 @@ async def _download_and_cleanup(settings: dict, output_files: list, input_files:
 
 
 async def _download_and_cleanup_cpu(settings: dict, output_files: list, input_files: dict):
-    """Retrieve and clean CPU-session artifacts through the signed HTTPS boundary."""
+    """Retrieve and clean CPU-session artifacts through the HTTPS boundary."""
     try:
         operation = _managed_cpu_artifact_operation(settings)
     except _SubmitError as error:
@@ -1803,7 +1788,7 @@ async def _download_and_cleanup_cpu(settings: dict, output_files: list, input_fi
             destination = local_output_path(output_dir, safe_path)
             _send_event("progress", {"message": f"Downloading: {os.path.basename(safe_path)}"})
             await download_cpu_artifact(
-                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.endpoint_id, settings["apiKey"],
                 operation.volume_binding, _artifact_operation_id("output", "read", target_path),
                 target_path, destination,
             )
@@ -1825,7 +1810,7 @@ async def _download_and_cleanup_cpu(settings: dict, output_files: list, input_fi
     for target_path in targets:
         try:
             await delete_cpu_artifact(
-                operation.endpoint_id, settings["apiKey"], operation.signing_key,
+                operation.endpoint_id, settings["apiKey"],
                 operation.volume_binding, _artifact_operation_id("cleanup", "delete", target_path), target_path,
             )
         except CpuArtifactError as error:

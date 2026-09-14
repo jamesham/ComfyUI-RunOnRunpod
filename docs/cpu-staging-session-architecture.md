@@ -36,19 +36,19 @@ is version 2 and requires rebuilding the worker image.
 
 Implemented next: `cpu_staging_contract.py` defines CPU staging protocol v1,
 strict request/result validation, target confinement, exact identities, volume
-binding, and HMAC-signed coordinator envelopes. `worker-cpu/` is a thin
-CPU-only Serverless image that validates this envelope before downloading or
+binding, and a RunPod-authenticated request contract. `worker-cpu/` is a thin
+CPU-only Serverless image that validates the request before downloading or
 writing. `cpu_stager_client.py` is wired as an opt-in replacement for the
-legacy GPU fetch action only when a matching coordinator-signed request is
+legacy GPU fetch action only when a matching coordinator-prepared request is
 present. No CPU endpoint is deployed or enabled by browser settings, and no
 live RunPod operation has been performed.
 
 Implemented next: `coordinator/` persists atomically versioned recipes,
-session bindings, authorization intent, and validated CPU completion records.
-It generates HMAC envelopes from the key supplied in the current plugin request
-only after saving the exact request; that key is never persisted or returned.
-With `managedSessionId`, the route obtains the CPU endpoint and signed request
-from this local state instead of browser settings. Lifecycle
+session bindings, preparation intent, and validated CPU completion records.
+It saves the exact validated request before it is submitted through the
+RunPod-authenticated HTTPS job API. With `managedSessionId`, the route obtains
+the CPU endpoint and prepared request from this local state instead of browser
+settings. Lifecycle
 adapter calls that create, attach, or delete RunPod resources remain unimplemented.
 
 Implemented next: the coordinator has a versioned managed-profile schema and
@@ -69,7 +69,7 @@ use a fake HTTP transport only; no live RunPod operation is enabled by this
 increment.
 
 Implemented next: browser-managed lifecycle actions use the RunPod API key,
-profile JSON, HMAC value, and optional coordinator-state folder supplied in
+profile JSON, and optional coordinator-state folder supplied in
 the plugin settings. The profile supplies the CPU template ID, but credentials
 inside it must be RunPod stored-secret references rather than literal values.
 No lifecycle environment-variable gate or operator CLI is used. `end`
@@ -78,21 +78,21 @@ durable output retrieval records can enforce that condition automatically.
 
 Implemented next: the existing plugin settings now expose `Model staging mode`.
 The default `gpu` value keeps the main-branch-compatible GPU fetch path even if
-stale CPU fields are present. Selecting `cpu` requires a matching signed CPU
+stale CPU fields are present. Selecting `cpu` requires a matching prepared CPU
 staging request and fails closed rather than falling back to GPU downloads.
 Hermetic tests cover both executor choices and invalid mode rejection.
 
 Implemented next: `integration/runpod_cpu_stager_smoke.py` is an explicitly
 opt-in live harness (`--live`) for the CPU path. It uses the coordinator,
-lifecycle adapter, secret-reference endpoint environment mapping, signed request,
-CPU client, and cleanup flow to create one temporary volume/CPU endpoint, reject
-one corrupted request, stage one pinned download, and delete the exact recorded
-resources. `--pause-after-create` allows RunPod-console inspection before
-staging and cleanup. It is never run by ordinary test discovery and has not
-been run against a live account here.
+lifecycle adapter, secret-reference endpoint environment mapping, prepared
+request, CPU client, and cleanup flow to create one temporary volume/CPU
+endpoint, stage one pinned download, and delete the exact recorded resources.
+`--pause-after-create` allows RunPod-console inspection before staging and
+cleanup. It is never run by ordinary test discovery and has not been run
+against a live account here.
 
-Implemented next: CPU-managed submission now has an authenticated, coordinator-
-signed artifact boundary over the RunPod Serverless job API. Bounded chunks can
+Implemented next: CPU-managed submission now has an authenticated artifact
+boundary over the RunPod Serverless job API. Bounded chunks can
 install local models and workflow inputs under the session volume, retrieve
 outputs, and perform per-job cleanup without an S3 client, bucket, or S3
 credential. CPU preparation is completed before GPU endpoint creation and
@@ -100,9 +100,8 @@ health/version/node checks; the session-owned endpoint is checked through the
 RunPod API for the same volume binding before inference;
 GPU-only mode retains its existing S3 and GPU preparation order. The browser
 now has guarded start/status/recover/end routes and additive sidebar controls.
-They use the plugin's RunPod API key, profile, signing key, recipe, and optional
-state-root setting only for the current request; the HMAC value is not stored in
-coordinator records. The browser-generated session ID is saved
+They use the plugin's RunPod API key, profile, recipe, and optional state-root
+setting only for the current request. The browser-generated session ID is saved
 before creation so a lost response can reconcile the same durable resource
 intent. This established the boundary used by the following lifecycle
 increment.
@@ -182,7 +181,7 @@ Non-goals for the initial implementation:
 | `routes.py::_identify_missing_models` | An existing object key counts as available. | Compare expected identity against a verified receipt in either staging mode. |
 | `routes.py::_run_worker_fetches` | Sends `fetch_models` and provider tokens to the GPU endpoint. | Retain GPU fetching only in `gpu` mode, but read provider tokens from worker environment variables rather than job payloads. CPU mode uses the separate CPU client. |
 | `routes.py::_resolve_model_sources` | An unresolved asset can fail to enter either the fetch or upload queue without stopping submission. | Return explicit unresolved entries and block GPU work. |
-| `model_lookup.py` | Useful discovery chain; some results are filename matches, mutable URLs, or lack hashes. | Retain discovery and add exact-source materialization before signing. |
+| `model_lookup.py` | Useful discovery chain; some results are filename matches, mutable URLs, or lack hashes. | Retain discovery and add exact-source materialization before staging. |
 | `worker/model_fetcher.py` | Downloads on GPU, publishes before optional checksum verification, and lacks shared target locks. | CPU mode uses the donor CPU staging core; GPU mode retains this worker with targeted identity, receipt, and credential-delivery fixes. |
 | `worker/start.sh` | Links models only if the volume directory already exists; supports startup-time custom-node installation. | Validate mounts and establish paths before ComfyUI starts; bake executable dependencies into images. |
 | `worker/handler.py::save_outputs` | Copies into `outputs/<timestamp>_<job-id>/`, flattening basenames. | Publish collision-safe per-run artifacts and immutable run records. |
@@ -224,13 +223,13 @@ flowchart TD
 
 | Component | Owns | Must not own |
 | --- | --- | --- |
-| Frontend | Existing workflow submission, display, history, cancellation. | Signing keys, lifecycle state, provider download implementation. |
+| Frontend | Existing workflow submission, display, history, cancellation. | Credential material, lifecycle state, provider download implementation. |
 | Local plugin gateway | ComfyUI paths, workflow metadata, existing routes/events, local uploads/output delivery. | Independent staging or cleanup implementations. |
-| Session coordinator | Profiles, recipes, source materialization, signing, resource bindings, durable jobs, RunPod lifecycle, readiness, recovery. | Browser presentation or wholesale workflow rewriting. |
-| CPU worker (`cpu` mode) | Signed request validation, downloads, upload installation, hashes, locks, receipts, capacity/transfer policy. | Inference, cloud deletion, arbitrary code installation. |
+| Session coordinator | Profiles, recipes, source materialization, request preparation, resource bindings, durable jobs, RunPod lifecycle, readiness, recovery. | Browser presentation or wholesale workflow rewriting. |
+| CPU worker (`cpu` mode) | Request validation, downloads, upload installation, hashes, locks, receipts, capacity/transfer policy. | Inference, cloud deletion, arbitrary code installation. |
 | GPU worker (`cpu` mode) | Job binding checks, staged-model loading, ComfyUI execution, output publication. | Source download fallback, model replacement, model-provider credentials. |
 | GPU worker (`gpu` mode) | Compatible model download/staging followed by ComfyUI execution and output publication. | Cloud deletion, arbitrary code installation. It may receive only the provider secrets configured in its endpoint environment. |
-| Shared core package | Donor manifest/signing/staging/output/lifecycle logic. | ComfyUI server imports and frontend dependencies. |
+| Shared core package | Donor manifest/staging/output/lifecycle logic. | ComfyUI server imports and frontend dependencies. |
 
 Keep the coordinator on Gentoo initially, consistent with the donor's platform
 boundary and POSIX lifecycle-state locking. Windows remains authoritative for
@@ -259,7 +258,7 @@ The UI setting is a user choice, not an automatic cost heuristic:
 | `stagingMode` | Resources and flow | Compatibility / policy |
 | --- | --- | --- |
 | `gpu` (default) | Existing GPU endpoint resolves/downloads missing models, then executes the workflow. | Preserve main-branch behavior and settings. Apply immutable identity, atomic publication, and environment-only provider credentials, but do not require a CPU endpoint or a managed session. |
-| `cpu` | CPU endpoint downloads/verifies/installs required models on the session volume; GPU endpoint starts only after readiness succeeds. | Requires a compatible CPU profile, shared session volume, signed stage request, and CPU-mode receipt barrier. CPU failures never fall back silently to GPU downloading. |
+| `cpu` | CPU endpoint downloads/verifies/installs required models on the session volume; GPU endpoint starts only after readiness succeeds. | Requires a compatible CPU profile, shared session volume, prepared stage request, and CPU-mode receipt barrier. CPU failures never fall back silently to GPU downloading. |
 
 | Setting | Initial policy |
 | --- | --- |
@@ -337,7 +336,7 @@ Hugging Face and CivitAI credentials follow a stronger worker-delivery rule:
    the relevant CPU and/or GPU Serverless endpoint configuration. Only the
    endpoint selected by the mode receives the provider secret.
 3. Worker code reads only those environment variables. Neither a RunPod job
-   payload nor a signed staging envelope contains a provider-token value.
+   payload nor a staging request contains a provider-token value.
 4. The plugin may retain/display a non-secret reference name after user consent,
    but it must never read, persist, or log the stored secret value.
 
@@ -366,13 +365,9 @@ an assumed API: the currently documented REST resource list covers compute,
 endpoints, volumes, templates, registry authentication, and billing, but does
 not document secret CRUD. Never guess an endpoint or use an undocumented API.
 
-The CPU-stage HMAC key is not a provider credential. It is a deployment
-authorization secret with the same value in the user's plugin setting and the
-CPU endpoint's securely injected runtime environment. The ComfyUI backend uses
-it only from the current request to sign an envelope, and never writes it to a
-recipe, session record, or worker result. The UI must warn that a remote
-ComfyUI server needs HTTPS: the browser sends this key and the RunPod API key to
-that server.
+RunPod API-key authentication and HTTPS protect CPU job submission. The UI must
+warn that a remote ComfyUI server needs HTTPS because the browser sends the
+RunPod API key to that server.
 
 ### Credential matrix
 
@@ -382,7 +377,6 @@ that server.
 | S3 access key and secret | User via ComfyUI plugin | Request-scoped local backend memory | Local backend S3 uploads, downloads, and receipt operations |
 | Hugging Face token | User in RunPod Secrets web UI; optional future plugin-to-documented-secret-API enrollment | RunPod secret injected as `HF_TOKEN` into selected CPU/GPU endpoint | CPU worker in `cpu` mode or GPU worker in `gpu` mode |
 | CivitAI API key | User in RunPod Secrets web UI; optional future plugin-to-documented-secret-API enrollment | RunPod secret injected as `CIVITAI_API_KEY` into selected CPU/GPU endpoint | CPU worker in `cpu` mode or GPU worker in `gpu` mode |
-| CPU staging HMAC key | User generates it with `tools/generate_hmac_key.py`, then enters it in the plugin and as a RunPod stored secret | Request-scoped ComfyUI backend memory; RunPod secret injected as `STAGING_REQUEST_HMAC_KEY` | Local coordinator signer and CPU worker verifier only |
 | Endpoint IDs, volume IDs, secret reference names | User/profile/coordinator | Non-secret settings and durable session/profile records | Backend and UI display only; never treated as credential values |
 
 ## 6. Durable recipes, runtime records, and storage layout
@@ -478,7 +472,7 @@ Separate two operations:
 
 1. Discover candidates from workflow metadata, opt-in Manager lookup, local
    Hugging Face cache information, Civitai lookup, and local files.
-2. Materialize an immutable resource plan that can be signed and verified.
+2. Materialize an immutable resource plan that can be validated and verified.
 
 Preserve existing preferences: workflow metadata remains a candidate independent
 of optional third-party lookup, lookup respects the user's setting, and local
@@ -520,13 +514,13 @@ content staging; build executable dependencies into the GPU image.
 
 ### Shared behavior to reuse
 
-Use donor `StagingService`, `stager`, `resolver`, `signing`, and `staging_policy`
-for validation before provider/filesystem work, signature verification, request
+Use donor `StagingService`, `stager`, `resolver`, and `staging_policy` for
+validation before provider/filesystem work, request
 identity, replay handling, operation records, target locking, bounded retries,
 capacity checks, safe partial files, verified reuse, atomic publication, and
 sanitized errors.
 
-For the existing operation, submit `input.signed_request` directly. Do not assume
+For the existing operation, submit `input.stage_request` directly. Do not assume
 the GPU transport's `input.action` protocol is the CPU contract.
 
 Required extensions:
@@ -534,29 +528,27 @@ Required extensions:
 1. Per-file progress callbacks and optional byte counters in the shared core,
    bridged to RunPod progress by the CPU wrapper. Progress is informational and
    must not determine operation correctness.
-2. A signed install operation for locally uploaded content. Use a separate
+2. An authenticated install operation for locally uploaded content. Use a separate
    versioned schema or explicitly version the staging contract; strict v1 cannot
    silently acquire new fields.
 3. Deployment binding to the expected session and volume incarnation. Compare
-   signed session identity against trusted deployment configuration before
+   the request session identity against trusted deployment configuration before
    writes. Generic issuer/audience checks alone do not distinguish deployments
    trusting the same keys.
 4. A readiness receipt bound to session, volume incarnation, resource-plan hash,
    and the complete verified asset set.
-5. Recovery/status lookup that does not start a GPU or reinterpret an expired
-   signed request as authorization for new work.
+5. Recovery/status lookup that does not start a GPU or reinterpret an old
+   prepared request as authorization for new work.
 
 Provider-token values are supplied only through RunPod's stored-secret and
 runtime-environment mechanism described in section 5. The profile entered in
 the plugin may contain approved non-secret references but cannot contain a
-literal token value or choose arbitrary credential environment values. The HMAC
-value is supplied separately in the plugin settings, used only by the current
-ComfyUI backend request, and never returned or persisted. Signatures
-authenticate requests; they do not encrypt their payloads.
+literal token value or choose arbitrary credential environment values. RunPod
+API-key authentication authorizes requests; HTTPS protects their transport.
 
 ### Mode-specific execution
 
-In `cpu` mode, submit the signed request as `input.signed_request` to the CPU
+In `cpu` mode, submit the prepared request as `input.stage_request` to the CPU
 endpoint. The CPU worker downloads public or secret-authorized sources, verifies
 identity, atomically publishes bytes, and returns a strict result. The local
 backend records that result and writes/validates the receipt before contacting
@@ -657,7 +649,7 @@ would leave stale IDs or block backend-managed configuration.
 Browser lifecycle actions use the user's request-scoped plugin API key; it is
 placed only in the short-lived provider adapter and is never written to
 coordinator state. CPU-mode creation requires an explicitly configured managed
-profile, HMAC key, and recipe plus the user's Start / Recover action. End
+profile and recipe plus the user's Start / Recover action. End
 Session is an explicit destructive action with an output-retention
 acknowledgement. There is no environment-variable or companion-CLI authority
 path for normal managed-session use.
@@ -850,7 +842,7 @@ worker image's protocol version, as the current project requires.
 - Fix output deletion after failed retrieval immediately.
 
 Progress: local model target/binding compilation, immutable local/remote
-materialization, volume readiness receipts, and a signed CPU-stage contract
+materialization, volume readiness receipts, and a CPU-stage contract
 with a thin CPU image are implemented. Durable recipe/session records, local
 request authorization, a fakeable lifecycle core, and a guarded, hermetically
 tested RunPod REST lifecycle adapter are implemented. Guarded browser routes
@@ -870,8 +862,8 @@ and legacy mode remain functional.
 
 - Persist the already user-visible `GPU only` / `CPU managed staging` choice
   with the session/run.
-- Build the CPU wrapper/image and configure trusted HMAC and provider secrets
-  through RunPod's supported secure-secret/environment mechanism.
+- Build the CPU wrapper/image and configure provider secrets through RunPod's
+  supported secure-secret/environment mechanism.
 - Add progress, deployment binding, receipts, and upload installation.
 - Connect preparation to the separate CPU endpoint.
 - Validate GPU mounts and disable managed GPU fetching.
@@ -927,7 +919,7 @@ remaining work.
 - Test large checkpoints, several LoRAs, and input media.
 - Test fresh volumes, warm reuse, additive staging, scale-to-zero, and a second
   session rebuilt after deleting the first volume.
-- Test CPU termination, queue delays beyond signature lifetime, volume-full
+- Test CPU termination, queue delays, volume-full
   behavior, mount visibility, and locking, plus GPU-only compatibility.
 - Measure CPU sizing, concurrency, and idle-timeout tradeoffs before tuning.
 
@@ -998,7 +990,7 @@ Donor paths relative to the separate `runpod-comfy` repository:
 
 - `AGENTS.md`, `STATUS.md`, `docs/architecture.md`
 - `src/runpod_comfy/stager.py`, `staging_service.py`, `staging_policy.py`
-- `src/runpod_comfy/resolver.py`, `signing.py`, `serverless_handler.py`
+- `src/runpod_comfy/resolver.py`, `serverless_handler.py`
 - `src/runpod_comfy/lifecycle.py`, `lifecycle_state.py`
 - `src/runpod_comfy/output_records.py`, `output_indexer.py`,
   `output_retriever.py`, `s3_object_store.py`

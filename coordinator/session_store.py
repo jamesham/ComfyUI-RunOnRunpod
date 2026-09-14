@@ -1,7 +1,7 @@
 """Local, crash-safe records for recipes and managed creative sessions.
 
 This module intentionally has no RunPod API client. It records intent and
-produces signed CPU-stage envelopes; a guarded lifecycle adapter may perform
+produces validated CPU-stage requests; a guarded lifecycle adapter may perform
 remote create/delete calls between those durable transitions when an operator
 explicitly enables it.
 """
@@ -22,7 +22,6 @@ from typing import Mapping
 try:  # Plugin package import; see fallback for direct coordinator tooling.
     from ..cpu_staging_contract import (
         CpuStagingContractError,
-        sign_stage_request,
         stage_request_from_downloads,
         validate_stage_result,
     )
@@ -31,7 +30,6 @@ try:  # Plugin package import; see fallback for direct coordinator tooling.
 except ImportError:  # pragma: no cover - exercised by direct CLI/library use.
     from cpu_staging_contract import (
         CpuStagingContractError,
-        sign_stage_request,
         stage_request_from_downloads,
         validate_stage_result,
     )
@@ -104,10 +102,10 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 class SessionCoordinator:
-    """Owns local recipe/session records and coordinator-only signing.
+    """Owns local recipe/session records and CPU request preparation.
 
-    ``root`` must be an explicitly selected local state directory. The signing
-    key is supplied for each request and is never persisted in these records.
+    ``root`` must be an explicitly selected local state directory. Credentials
+    are request-scoped and are never persisted in these records.
     """
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
@@ -367,14 +365,13 @@ class SessionCoordinator:
                 _atomic_json(path, record)
                 return record
 
-    def authorize_stage(
+    def prepare_stage_request(
         self,
         session_id: str,
         prep_id: str,
         downloads: list[dict],
-        signing_key: str,
     ) -> dict[str, object]:
-        """Persist stage intent, then return the coordinator-signed envelope."""
+        """Persist stage intent, then return the validated stage request."""
         session_id = _id(session_id, "session ID")
         prep_id = _id(prep_id, "preparation ID")
         path = self._session_path(session_id)
@@ -391,23 +388,23 @@ class SessionCoordinator:
                         prep_id, bindings.get("volume_binding", ""), downloads,
                     )
                 except CpuStagingContractError as error:
-                    raise CoordinatorError(f"cannot authorize stage request: {error}") from None
+                    raise CoordinatorError(f"cannot prepare stage request: {error}") from None
                 preparations = record.setdefault("preparations", {})
                 if not isinstance(preparations, dict):
                     raise CoordinatorError("session preparations are invalid")
                 existing = preparations.get(prep_id)
                 request_hash = _canonical_hash(request)
                 if isinstance(existing, Mapping) and existing.get("request_sha256") != request_hash:
-                    raise CoordinatorError("preparation ID was already authorized for different content")
+                    raise CoordinatorError("preparation ID was already prepared for different content")
                 preparations[prep_id] = {
-                    "state": "authorized", "authorized_at": _now(),
+                    "state": "prepared", "prepared_at": _now(),
                     "request_sha256": request_hash, "request": request,
                 }
                 record["state"] = "preparing"
                 record["updated_at"] = _now()
                 _atomic_json(path, record)
 
-        return sign_stage_request(request, signing_key)
+        return request
 
     def record_stage_result(self, session_id: str, prep_id: str, result: object) -> dict[str, object]:
         """Accept only a complete validated CPU result and make the session ready."""

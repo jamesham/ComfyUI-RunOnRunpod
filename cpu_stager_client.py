@@ -1,4 +1,4 @@
-"""RunPod transport for a coordinator-signed CPU staging operation."""
+"""RunPod transport for an authenticated CPU staging operation."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import time
 from typing import Callable
 
 try:  # Plugin package import; direct integration-harness import fallback.
-    from .cpu_staging_contract import CpuStagingContractError, unsigned_stage_payload, validate_stage_result
+    from .cpu_staging_contract import CpuStagingContractError, validate_stage_request, validate_stage_result
 except ImportError:  # pragma: no cover - exercised by the standalone harness.
-    from cpu_staging_contract import CpuStagingContractError, unsigned_stage_payload, validate_stage_result
+    from cpu_staging_contract import CpuStagingContractError, validate_stage_request, validate_stage_result
 
 
 class CpuStagerError(RuntimeError):
@@ -22,14 +22,14 @@ ApiCallTrace = Callable[[str, str, object, int | None, object], None]
 async def stage_models(
     endpoint_id: str,
     api_key: str,
-    signed_request: object,
+    stage_request: object,
     on_progress=None,
     *,
     timeout_seconds: float | None = None,
     poll_interval_seconds: float = 1,
     on_api_call: ApiCallTrace | None = None,
 ) -> dict[str, object]:
-    """Run a signed CPU stage request and return its validated final result."""
+    """Run a CPU stage request and return its validated final result."""
     if not isinstance(endpoint_id, str) or not endpoint_id:
         raise CpuStagerError("CPU staging endpoint ID is required")
     if timeout_seconds is not None and timeout_seconds <= 0:
@@ -40,13 +40,13 @@ async def stage_models(
         import aiohttp
     except ImportError:
         raise CpuStagerError("CPU staging transport requires aiohttp") from None
-    request = unsigned_stage_payload(signed_request)
+    request = validate_stage_request(stage_request)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "User-Agent": "ComfyUI-RunOnRunpod",
     }
     deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
-    request_body = {"input": {"signed_request": signed_request}}
+    request_body = {"input": {"stage_request": request}}
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"https://api.runpod.ai/v2/{endpoint_id}/run",

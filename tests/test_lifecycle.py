@@ -140,14 +140,14 @@ class LifecycleTests(unittest.TestCase):
                 },
             })
 
-    def test_cpu_profile_rejects_literal_credential_values(self):
+    def test_cpu_profile_rejects_literal_provider_credential_values(self):
         with self.assertRaisesRegex(LifecycleError, "stored-secret references"):
             ManagedProfile.from_dict({
                 "profile_version": 1, "profile_id": "p", "data_center": "dc",
                 "volume": {"size_gb": 10},
                 "cpu": {
                     "image": "cpu",
-                    "environment": {"STAGING_REQUEST_HMAC_KEY": "literal-secret"},
+                    "environment": {"HF_TOKEN": "literal-secret"},
                 },
             })
 
@@ -158,7 +158,6 @@ class LifecycleTests(unittest.TestCase):
             "cpu": {
                 "image": "cpu",
                 "environment": {
-                    "STAGING_REQUEST_HMAC_KEY": "{{ RUNPOD_SECRET_cpu_hmac }}",
                     "HF_TOKEN": "{{ RUNPOD_SECRET_hf_token }}",
                 },
             },

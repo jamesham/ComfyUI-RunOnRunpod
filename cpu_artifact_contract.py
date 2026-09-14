@@ -1,4 +1,4 @@
-"""Signed, bounded CPU-volume artifact operations.
+"""Bounded CPU-volume artifact operations.
 
 CPU-managed sessions use this contract for files that cannot be fetched from a
 model provider: local-model fallback, ComfyUI inputs, output retrieval, and
@@ -11,8 +11,6 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import hmac
-import json
 from typing import Mapping
 
 
@@ -24,10 +22,6 @@ _ROOTS = frozenset({"models", "inputs", "outputs"})
 
 class CpuArtifactContractError(ValueError):
     """An artifact request or response is malformed or unsafe."""
-
-
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _identifier(value: object, label: str) -> str:
@@ -108,30 +102,3 @@ def validate_artifact_request(value: object) -> dict[str, object]:
             raise CpuArtifactContractError("artifact read length is outside the permitted range")
         normalized["length"] = length
     return normalized
-
-
-def sign_artifact_request(request: object, key: str) -> dict[str, object]:
-    payload = validate_artifact_request(request)
-    if not isinstance(key, str) or not key:
-        raise CpuArtifactContractError("artifact signing key is required")
-    signature = hmac.new(key.encode("utf-8"), _canonical_bytes(payload), hashlib.sha256).hexdigest()
-    return {"payload": payload, "signature": signature}
-
-
-def verify_signed_artifact_request(envelope: object, key: str) -> dict[str, object]:
-    if not isinstance(envelope, Mapping):
-        raise CpuArtifactContractError("signed artifact request must be an object")
-    signature = envelope.get("signature")
-    if not isinstance(signature, str) or not isinstance(key, str) or not key:
-        raise CpuArtifactContractError("signed artifact request is missing a signature")
-    payload = validate_artifact_request(envelope.get("payload"))
-    expected = hmac.new(key.encode("utf-8"), _canonical_bytes(payload), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise CpuArtifactContractError("signed artifact request signature is invalid")
-    return payload
-
-
-def unsigned_artifact_payload(envelope: object) -> dict[str, object]:
-    if not isinstance(envelope, Mapping):
-        raise CpuArtifactContractError("signed artifact request must be an object")
-    return validate_artifact_request(envelope.get("payload"))

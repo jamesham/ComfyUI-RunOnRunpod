@@ -1,4 +1,4 @@
-"""RunPod HTTPS transport for signed CPU-volume artifact operations."""
+"""RunPod HTTPS transport for CPU-volume artifact operations."""
 
 from __future__ import annotations
 
@@ -17,16 +17,14 @@ try:
         CPU_ARTIFACT_PROTOCOL_VERSION,
         MAX_CHUNK_BYTES,
         CpuArtifactContractError,
-        sign_artifact_request,
-        unsigned_artifact_payload,
+        validate_artifact_request,
     )
 except ImportError:  # pragma: no cover - direct worker-tool import fallback.
     from cpu_artifact_contract import (  # type: ignore
         CPU_ARTIFACT_PROTOCOL_VERSION,
         MAX_CHUNK_BYTES,
         CpuArtifactContractError,
-        sign_artifact_request,
-        unsigned_artifact_payload,
+        validate_artifact_request,
     )
 
 
@@ -37,7 +35,7 @@ class CpuArtifactError(RuntimeError):
 async def _run_request(
     endpoint_id: str,
     api_key: str,
-    signed_request: object,
+    artifact_request: object,
     *,
     timeout_seconds: float = 1_800,
     poll_interval_seconds: float = 1,
@@ -47,7 +45,7 @@ async def _run_request(
     if not isinstance(api_key, str) or not api_key:
         raise CpuArtifactError("RunPod API key is required for CPU artifact transfer")
     try:
-        request = unsigned_artifact_payload(signed_request)
+        request = validate_artifact_request(artifact_request)
         import aiohttp
     except CpuArtifactContractError as error:
         raise CpuArtifactError(str(error)) from None
@@ -58,7 +56,7 @@ async def _run_request(
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"https://api.runpod.ai/v2/{endpoint_id}/run", headers=headers,
-            json={"input": {"signed_artifact_request": signed_request}},
+            json={"input": {"artifact_request": request}},
         ) as response:
             submitted = await response.json()
         job_id = submitted.get("id") if isinstance(submitted, dict) else None
@@ -108,13 +106,12 @@ def _request(
 async def upload_file(
     endpoint_id: str,
     api_key: str,
-    signing_key: str,
     volume_binding: str,
     operation_id: str,
     target_path: str,
     source_path: str,
 ) -> dict[str, object]:
-    """Install a local file on the CPU-attached volume in signed chunks."""
+    """Install a local file on the CPU-attached volume in bounded chunks."""
     digest = hashlib.sha256()
     size = 0
     with open(source_path, "rb") as source:
@@ -136,7 +133,7 @@ async def upload_file(
                 data=base64.b64encode(chunk).decode("ascii"), complete=complete,
                 expected_sha256=digest.hexdigest(), expected_size=size,
             )
-            final_result = await _run_request(endpoint_id, api_key, sign_artifact_request(request, signing_key))
+            final_result = await _run_request(endpoint_id, api_key, request)
             offset += len(chunk)
             if complete or (
                 final_result.get("sha256") == digest.hexdigest()
@@ -153,7 +150,6 @@ async def upload_file(
 async def download_file(
     endpoint_id: str,
     api_key: str,
-    signing_key: str,
     volume_binding: str,
     operation_id: str,
     target_path: str,
@@ -171,7 +167,7 @@ async def download_file(
                     operation_id, volume_binding, "read", target_path,
                     offset=offset, length=MAX_CHUNK_BYTES,
                 )
-                result = await _run_request(endpoint_id, api_key, sign_artifact_request(request, signing_key))
+                result = await _run_request(endpoint_id, api_key, request)
                 encoded = result.get("data")
                 if not isinstance(encoded, str):
                     raise CpuArtifactError("CPU artifact read response has no data")
@@ -201,10 +197,9 @@ async def download_file(
 async def delete_file(
     endpoint_id: str,
     api_key: str,
-    signing_key: str,
     volume_binding: str,
     operation_id: str,
     target_path: str,
 ) -> None:
     request = _request(operation_id, volume_binding, "delete", target_path)
-    await _run_request(endpoint_id, api_key, sign_artifact_request(request, signing_key))
+    await _run_request(endpoint_id, api_key, request)

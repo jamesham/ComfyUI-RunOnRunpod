@@ -20,7 +20,6 @@ from .session_store import SessionCoordinator
 PROFILE_SETTING = "managedProfile"
 RECIPE_SETTING = "managedRecipeId"
 STATE_ROOT_SETTING = "managedStateRoot"
-SIGNING_KEY_SETTING = "managedSigningKey"
 DEFAULT_RECIPE_ID = "default"
 
 
@@ -133,11 +132,3 @@ def lifecycle_from_settings(
     coordinator, profile, recipe_id = managed_configuration_from_settings(values)
     provider = RunPodLifecycleAdapter(api_key, allow_mutations=True, transport=transport)
     return SessionLifecycleService(coordinator, provider), profile, recipe_id
-
-
-def signing_key_from_settings(settings: Mapping[str, object]) -> str:
-    """Read the HMAC value only from the current request; never persist it."""
-    value = settings.get(SIGNING_KEY_SETTING)
-    if not isinstance(value, str) or not value:
-        raise ManagedSessionConfigError("CPU managed staging requires the CPU staging HMAC key")
-    return value

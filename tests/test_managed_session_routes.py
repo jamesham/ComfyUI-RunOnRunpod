@@ -185,9 +185,6 @@ class ManagedSessionRouteTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             self.routes, "managed_configuration_from_settings",
             return_value=(self.coordinator, profile, "recipe-1"),
-        ), patch.object(
-            self.routes, "signing_key_from_settings",
-            return_value="do-not-return-this",
         ):
             result = await self.routes.managed_session_config(Request({"settings": self.settings}))
 

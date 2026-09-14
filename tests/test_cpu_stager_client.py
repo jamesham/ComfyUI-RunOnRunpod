@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from cpu_stager_client import CpuStagerError, stage_models
-from cpu_staging_contract import sign_stage_request
 
 
 class FakeResponse:
@@ -59,7 +58,6 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
                 "expected_sha256": digest, "expected_size": 5, "auth": "none",
             }],
         }
-        self.envelope = sign_stage_request(self.request, "key")
         self.result = {
             "protocol_version": 1, "operation_id": "prep-1", "status": "success",
             "results": [{
@@ -68,7 +66,7 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
             }],
         }
 
-    async def test_submits_signed_envelope_reports_progress_and_validates_result(self):
+    async def test_submits_request_reports_progress_and_validates_result(self):
         session = FakeSession({"id": "job-1"}, [
             {"status": "IN_PROGRESS", "output": {"results": []}},
             {"status": "COMPLETED", "output": self.result},
@@ -79,7 +77,7 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
              patch("cpu_stager_client.asyncio.sleep", new=AsyncMock()) as sleep:
             result = await stage_models(
-                "cpu-endpoint", "api-key", self.envelope, progress.append,
+                "cpu-endpoint", "api-key", self.request, progress.append,
                 on_api_call=lambda *call: api_calls.append(call),
             )
 
@@ -92,12 +90,12 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.gets[0][1]["headers"], {
             "Authorization": "Bearer api-key", "User-Agent": "ComfyUI-RunOnRunpod",
         })
-        self.assertEqual(session.posts[0][1]["json"], {"input": {"signed_request": self.envelope}})
+        self.assertEqual(session.posts[0][1]["json"], {"input": {"stage_request": self.request}})
         self.assertEqual(len(session.gets), 2)
         self.assertEqual(sleep.await_count, 2)
         self.assertEqual(api_calls[0], (
             "POST", "https://api.runpod.ai/v2/cpu-endpoint/run",
-            {"input": {"signed_request": self.envelope}}, 200, {"id": "job-1"},
+            {"input": {"stage_request": self.request}}, 200, {"id": "job-1"},
         ))
         self.assertEqual([call[0] for call in api_calls[1:]], ["GET", "GET"])
 
@@ -107,18 +105,18 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
              patch("cpu_stager_client.asyncio.sleep", new=AsyncMock()):
             with self.assertRaisesRegex(CpuStagerError, "download failed"):
-                await stage_models("cpu-endpoint", "api-key", self.envelope)
+                await stage_models("cpu-endpoint", "api-key", self.request)
 
-    async def test_completed_worker_signature_rejection_is_reported(self):
+    async def test_completed_worker_request_rejection_is_reported(self):
         session = FakeSession({"id": "job-1"}, [{
             "status": "COMPLETED",
-            "output": {"status": "failed", "error": "signed stage request signature is invalid"},
+            "output": {"status": "failed", "error": "stage request is invalid"},
         }])
         aiohttp = SimpleNamespace(ClientSession=lambda: session)
         with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
              patch("cpu_stager_client.asyncio.sleep", new=AsyncMock()):
-            with self.assertRaisesRegex(CpuStagerError, "signature is invalid"):
-                await stage_models("cpu-endpoint", "api-key", self.envelope)
+            with self.assertRaisesRegex(CpuStagerError, "request is invalid"):
+                await stage_models("cpu-endpoint", "api-key", self.request)
 
     async def test_timeout_stops_polling_before_another_status_request(self):
         session = FakeSession({"id": "job-1"}, [])
@@ -126,7 +124,7 @@ class CpuStagerClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
              patch("cpu_stager_client.time.monotonic", side_effect=(100, 102)):
             with self.assertRaisesRegex(CpuStagerError, "timed out"):
-                await stage_models("cpu-endpoint", "api-key", self.envelope, timeout_seconds=1)
+                await stage_models("cpu-endpoint", "api-key", self.request, timeout_seconds=1)
         self.assertEqual(session.gets, [])
 
 

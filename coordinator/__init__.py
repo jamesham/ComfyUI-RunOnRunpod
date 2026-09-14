@@ -1,4 +1,4 @@
-"""Durable local records and signed-request production for managed sessions."""
+"""Durable local records and CPU request preparation for managed sessions."""
 
 from .session_store import CoordinatorError, SessionCoordinator
 from .lifecycle import LifecycleError, ManagedProfile, SessionLifecycleService
@@ -9,7 +9,6 @@ from .managed_sessions import (
     lifecycle_from_settings,
     managed_configuration_from_settings,
     managed_recipe_from_settings,
-    signing_key_from_settings,
     validate_v2_gpu_profile,
 )
 
@@ -18,6 +17,6 @@ __all__ = [
     "ManagedSessionConfigError", "RunPodAdapterError", "RunPodLifecycleAdapter",
     "SessionCoordinator", "SessionLifecycleService", "coordinator_from_settings",
     "lifecycle_from_settings", "managed_configuration_from_settings",
-    "managed_recipe_from_settings", "signing_key_from_settings",
+    "managed_recipe_from_settings",
     "validate_v2_gpu_profile",
 ]

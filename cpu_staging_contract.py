@@ -1,15 +1,7 @@
-"""Versioned, signed contract shared by the plugin and CPU staging image.
-
-The browser never creates these envelopes. A future session coordinator signs
-the request with a key trusted by the CPU deployment; this module only defines
-the portable payload and deterministic validation rules.
-"""
+"""Versioned contract shared by the plugin and CPU staging image."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 from typing import Mapping
 
 try:  # Package import in the ComfyUI plugin; top-level import in worker-cpu.
@@ -23,11 +15,7 @@ _VALID_AUTH = {"none", "hf", "civitai"}
 
 
 class CpuStagingContractError(ValueError):
-    """A CPU staging request, envelope, or result is unsafe or malformed."""
-
-
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """A CPU staging request or result is unsafe or malformed."""
 
 
 def _relative_model_target(value: object) -> str:
@@ -94,7 +82,7 @@ def stage_request_from_downloads(
     volume_binding: str,
     downloads: list[dict],
 ) -> dict[str, object]:
-    """Produce the unsigned payload that a coordinator must sign."""
+    """Produce the validated request sent through RunPod's authenticated API."""
     models = []
     for download in downloads:
         model = dict(download)
@@ -109,36 +97,6 @@ def stage_request_from_downloads(
         "volume_binding": volume_binding,
         "models": models,
     })
-
-
-def sign_stage_request(request: object, key: str) -> dict[str, object]:
-    """Coordinator-only helper; do not expose its key to browser settings."""
-    payload = validate_stage_request(request)
-    if not isinstance(key, str) or not key:
-        raise CpuStagingContractError("signing key is required")
-    signature = hmac.new(key.encode("utf-8"), _canonical_bytes(payload), hashlib.sha256).hexdigest()
-    return {"payload": payload, "signature": signature}
-
-
-def verify_signed_stage_request(envelope: object, key: str) -> dict[str, object]:
-    """Verify an envelope received by the CPU deployment."""
-    if not isinstance(envelope, Mapping):
-        raise CpuStagingContractError("signed stage request must be an object")
-    signature = envelope.get("signature")
-    if not isinstance(signature, str) or not isinstance(key, str) or not key:
-        raise CpuStagingContractError("signed stage request is missing a signature")
-    payload = validate_stage_request(envelope.get("payload"))
-    expected = hmac.new(key.encode("utf-8"), _canonical_bytes(payload), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        raise CpuStagingContractError("signed stage request signature is invalid")
-    return payload
-
-
-def unsigned_stage_payload(envelope: object) -> dict[str, object]:
-    """Validate payload shape locally without attempting signature verification."""
-    if not isinstance(envelope, Mapping):
-        raise CpuStagingContractError("signed stage request must be an object")
-    return validate_stage_request(envelope.get("payload"))
 
 
 def validate_stage_result(value: object, request: object) -> dict[str, object]:

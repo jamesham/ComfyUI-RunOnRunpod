@@ -159,9 +159,9 @@ class OutputCompletionTests(unittest.IsolatedAsyncioTestCase):
             self.settings, ["job/a.png"], self.inputs,
         ), ["job/a.png"])
 
-    async def test_cpu_retrieval_uses_signed_artifacts_without_s3(self):
+    async def test_cpu_retrieval_uses_artifacts_without_s3(self):
         operation = SimpleNamespace(
-            endpoint_id="cpu-endpoint", volume_binding="volume-1", signing_key="hmac",
+            endpoint_id="cpu-endpoint", volume_binding="volume-1",
         )
         settings = {
             "apiKey": "test-only", "endpointId": "gpu-endpoint", "stagingMode": "cpu",
@@ -176,9 +176,9 @@ class OutputCompletionTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(files, ["job/a.png"])
         self.make_client.assert_not_called()
-        self.assertEqual(download.await_args.args[:6], (
-            "cpu-endpoint", "test-only", "hmac", "volume-1",
-            download.await_args.args[4], "outputs/job/a.png",
+        self.assertEqual(download.await_args.args[:5], (
+            "cpu-endpoint", "test-only", "volume-1",
+            download.await_args.args[3], "outputs/job/a.png",
         ))
         self.assertEqual(delete.await_count, 2)
 

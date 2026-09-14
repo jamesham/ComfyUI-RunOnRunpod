@@ -1,4 +1,4 @@
-"""Thin CPU-only Serverless stager for signed, immutable model requests."""
+"""Thin CPU-only Serverless stager for authenticated, immutable model requests."""
 
 from __future__ import annotations
 
@@ -14,19 +14,18 @@ import runpod
 from cpu_staging_contract import (
     CPU_STAGING_PROTOCOL_VERSION,
     CpuStagingContractError,
-    verify_signed_stage_request,
+    validate_stage_request,
 )
 from cpu_artifact_contract import (
     CPU_ARTIFACT_PROTOCOL_VERSION,
     CpuArtifactContractError,
-    verify_signed_artifact_request,
+    validate_artifact_request,
 )
 from file_lock import advisory_file_lock
 
 
 VOLUME_DIR = os.environ.get("STAGING_VOLUME_DIR", "/runpod-volume")
 VOLUME_BINDING = os.environ.get("STAGING_VOLUME_BINDING", "")
-SIGNING_KEY = os.environ.get("STAGING_REQUEST_HMAC_KEY", "")
 CHUNK_SIZE = 4 * 1024 * 1024
 
 
@@ -96,7 +95,7 @@ def _stage_one(model: dict) -> dict[str, object]:
                     os.fsync(handle.fileno())
             actual_sha256 = digest.hexdigest()
             if actual_sha256 != model["expected_sha256"] or written != model["expected_size"]:
-                raise StageError("downloaded bytes do not match the signed identity")
+                raise StageError("downloaded bytes do not match the expected identity")
             os.replace(partial, destination)
             return {
                 "target_path": model["target_path"], "status": "done",
@@ -157,7 +156,7 @@ def _artifact_write(request: dict[str, object]) -> dict[str, object]:
                 os.remove(partial)
             except OSError:
                 pass
-            raise StageError("artifact bytes do not match the signed identity")
+            raise StageError("artifact bytes do not match the expected identity")
         os.replace(partial, destination)
         return {
             "artifact_protocol_version": CPU_ARTIFACT_PROTOCOL_VERSION,
@@ -202,11 +201,11 @@ def _artifact_delete(request: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _handle_artifact_request(job: dict, envelope: object) -> dict[str, object]:
+def _handle_artifact_request(job: dict, value: object) -> dict[str, object]:
     try:
-        request = verify_signed_artifact_request(envelope, SIGNING_KEY)
+        request = validate_artifact_request(value)
         if request["volume_binding"] != VOLUME_BINDING:
-            raise StageError("signed artifact request volume binding does not match deployment")
+            raise StageError("artifact request volume binding does not match deployment")
         if request["action"] == "write":
             return _artifact_write(request)
         if request["action"] == "read":
@@ -220,12 +219,12 @@ def handler(job: dict) -> dict[str, object]:
     job_input = job.get("input")
     if not isinstance(job_input, dict):
         return {"status": "failed", "error": "job input is invalid"}
-    if "signed_artifact_request" in job_input:
-        return _handle_artifact_request(job, job_input.get("signed_artifact_request"))
+    if "artifact_request" in job_input:
+        return _handle_artifact_request(job, job_input.get("artifact_request"))
     try:
-        request = verify_signed_stage_request(job_input.get("signed_request"), SIGNING_KEY)
+        request = validate_stage_request(job_input.get("stage_request"))
         if request["volume_binding"] != VOLUME_BINDING:
-            raise StageError("signed request volume binding does not match deployment")
+            raise StageError("stage request volume binding does not match deployment")
     except (KeyError, CpuStagingContractError, StageError) as error:
         return {"status": "failed", "error": str(error)}
 

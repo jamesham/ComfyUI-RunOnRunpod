@@ -8,7 +8,6 @@ import threading
 import unittest
 
 from coordinator import CoordinatorError, SessionCoordinator
-from cpu_staging_contract import verify_signed_stage_request
 from resource_plan import ModelIdentity, compile_model_resource_plan
 
 
@@ -49,10 +48,9 @@ class SessionCoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(session["state"], "planned")
 
-        envelope = self.coordinator.authorize_stage(
-            "session-1", "prep-1", self.downloads, "coordinator-key",
+        request = self.coordinator.prepare_stage_request(
+            "session-1", "prep-1", self.downloads,
         )
-        request = verify_signed_stage_request(envelope, "coordinator-key")
         self.assertEqual(request["volume_binding"], "volume-binding")
         persisted = self.coordinator.get_session("session-1")
         self.assertEqual(persisted["state"], "preparing")
@@ -76,10 +74,10 @@ class SessionCoordinatorTests(unittest.TestCase):
             "recipe-1", session_id="session-1", volume_binding="volume-binding",
             cpu_endpoint_id="cpu-endpoint",
         )
-        self.coordinator.authorize_stage("session-1", "prep-1", self.downloads, "key")
+        self.coordinator.prepare_stage_request("session-1", "prep-1", self.downloads)
         changed = [dict(self.downloads[0], expected_size=12)]
         with self.assertRaisesRegex(CoordinatorError, "different content"):
-            self.coordinator.authorize_stage("session-1", "prep-1", changed, "key")
+            self.coordinator.prepare_stage_request("session-1", "prep-1", changed)
 
     def test_local_recipe_source_requires_portable_reference(self):
         requirement = self.plan.requirements[0]

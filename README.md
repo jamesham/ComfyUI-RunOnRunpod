@@ -18,17 +18,17 @@ restaged. **Model staging mode** defaults to *GPU only (compatible)*, retaining
 the existing worker fetch path. *CPU managed staging* is an explicit opt-in and
 requires its separately configured coordinator and CPU endpoint; it never falls
 back to GPU downloads. In CPU mode, model/input installation and output
-retrieval use signed, bounded HTTPS jobs against the CPU endpoint, so the
+retrieval use bounded HTTPS jobs against the CPU endpoint, so the
 selected session does not require RunPod S3 credentials. The sidebar can start,
 inspect, recover, and end a managed session from the user's RunPod settings.
-The RunPod API key and CPU HMAC key are handed to the backend only with the
-request; neither is written into coordinator records.
+The RunPod API key is handed to the backend only with the request and is not
+written into coordinator records.
 
 The repository now also contains a separate [`worker-cpu/`](worker-cpu/) image,
-signed model-staging contract, and signed artifact-transfer contract for the CPU
+model-staging contract and artifact-transfer contract for the CPU
 Serverless endpoint. It is not deployed or enabled by default; ordinary
 submissions keep their current GPU worker behavior until a session coordinator
-provides a matching signed request.
+provides a matching request.
 
 `coordinator/` provides the local durable record core for recipes and managed
 sessions, plus a RunPod REST lifecycle adapter. The adapter targets
@@ -45,23 +45,14 @@ their existing GPU-worker behavior in this release.
 For sidebar-managed CPU sessions, use **Settings → Run on Runpod** to enter:
 
 - RunPod API key
-- CPU staging HMAC key
 - managed profile JSON (the CPU image/template, GPU policy, volume size, and
   RunPod stored-secret *references*)
 - an optional recipe ID and local coordinator-state folder
 
-The profile must use RunPod stored-secret references for `STAGING_REQUEST_HMAC_KEY`
-and CPU provider tokens; literal credential values are rejected. Follow the
-[CPU staging HMAC key guide](docs/cpu-staging-hmac-key.md) to generate the HMAC
-key and configure its matching RunPod secret. The settings UI warns that these
+The profile must use RunPod stored-secret references for CPU provider tokens;
+literal credential values are rejected. The settings UI warns that these
 credentials are sent to the ComfyUI server: use HTTPS whenever that server is
 remote, because an HTTP connection does not protect them in transit.
-
-Generate the HMAC value with the included cross-platform script before creating
-its RunPod stored secret: `python3 tools/generate_hmac_key.py` on macOS/Linux,
-`py tools\generate_hmac_key.py` on Windows, or ComfyUI portable's
-`python_embeded\python.exe tools\generate_hmac_key.py`. The complete setup is
-in the [CPU staging HMAC key guide](docs/cpu-staging-hmac-key.md).
 
 The sidebar's **Start / Recover Session** action persists its generated session
 ID before creating the volume and CPU endpoint, making a retry reconcile the
@@ -89,7 +80,6 @@ for browser-managed CPU sessions. For example:
     "flavor_ids": ["cpu3c"],
     "vcpu_count": 4,
     "environment": {
-      "STAGING_REQUEST_HMAC_KEY": "{{ RUNPOD_SECRET_cpu-stager-hmac }}",
       "HF_TOKEN": "{{ RUNPOD_SECRET_huggingface-token }}"
     }
   },

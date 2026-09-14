@@ -5,19 +5,18 @@ integration harness. It is not part of ordinary test discovery and refuses to
 run without `--live`.
 
 It uses the project coordinator, lifecycle service, RunPod lifecycle adapter,
-signed CPU-staging contract, CPU client, and CPU worker protocol to:
+CPU-staging contract, CPU client, and CPU worker protocol to:
 
 1. create a uniquely named temporary network volume;
 2. create one CPU Serverless endpoint attached to that exact volume;
-3. configure the CPU endpoint with the required secret references and dynamic
+3. configure the CPU endpoint with the provider-secret reference and dynamic
    `STAGING_VOLUME_BINDING` environment variable;
-4. submit a deliberately corrupted signed request and require worker refusal;
-5. submit one valid, identity-pinned download using the same endpoint and
+4. submit one identity-pinned download using the same endpoint and
    volume, then validate and record the CPU result through the shared contract;
    and
-6. delete the exact recorded CPU endpoint and volume, confirming absence.
+5. delete the exact recorded CPU endpoint and volume, confirming absence.
 
-It never prints API keys, HMAC values, provider-token values, or endpoint
+It never prints API keys, provider-token values, or endpoint
 environment values. It does print the temporary session, volume, and endpoint
 IDs so the operator can inspect them.
 
@@ -41,16 +40,13 @@ unchanged.
 - At least one eligible CPU flavor ID and a valid power-of-two vCPU count for
   that flavor. Obtain valid IDs and limits from RunPod's v2 CPU catalog; the
   harness passes these as the endpoint's explicit CPU configuration.
-- In the RunPod administrative UI, create two stored secrets:
-  - an HMAC secret whose value is also supplied to the harness by its secure
-    prompt or `--signing-key-file`;
-  - a valid Hugging Face or CivitAI token, selected by `--provider`.
+- In the RunPod administrative UI, create a valid Hugging Face or CivitAI
+  token, selected by `--provider`.
 - The template/endpoint configuration accepts stored-secret references in the
   Serverless `env` mapping. This harness uses the project assumption that the
   published reference syntax is consistent with Pods:
 
   ```text
-  STAGING_REQUEST_HMAC_KEY={{ RUNPOD_SECRET_<hmac-secret-name> }}
   HF_TOKEN={{ RUNPOD_SECRET_<provider-secret-name> }}
   ```
 
@@ -72,7 +68,6 @@ python -m integration.runpod_cpu_stager_smoke \
   --cpu-image 'registry.example/runonrunpod-cpu@sha256:<IMAGE_DIGEST>' \
   --cpu-flavor-id '<CPU_FLAVOR_ID>' \
   --vcpu-count 4 \
-  --hmac-secret-name '<RUNPOD_HMAC_SECRET_NAME>' \
   --provider hf \
   --provider-secret-name '<RUNPOD_HF_SECRET_NAME>' \
   --download-url 'https://huggingface.co/.../resolve/<COMMIT>/<FILE>' \
@@ -80,31 +75,21 @@ python -m integration.runpod_cpu_stager_smoke \
   --size '<BYTE_SIZE>'
 ```
 
-The command prompts without echo for the RunPod API key and CPU staging HMAC
-key. For unattended use, pass `--api-key-file <path>` and
-`--signing-key-file <path>`; each file must contain only its value and should
-be protected by the local operating system. Generate the HMAC key using the
-[CPU staging HMAC key guide](cpu-staging-hmac-key.md).
+The command prompts without echo for the RunPod API key. For unattended use,
+pass `--api-key-file <path>`; the file must contain only the key and should be
+protected by the local operating system.
 
 Add `--pause-after-create` to stop immediately after the CPU endpoint and
 volume are created. Inspect their compute type, min/max worker counts, shared
 volume attachment, and environment-variable *names* in RunPod. Press Enter to
-resume the signature-refusal check, single download, and cleanup. Without the
+resume the single download and cleanup. Without the
 flag, the harness proceeds non-interactively.
 
 Add `--debug` to write a line for every RunPod lifecycle and Serverless API
 call to stderr. Each line includes the method, path, HTTP status, and a
-redacted request/result summary. Authorization headers, HMAC key material,
-tokens, and all endpoint environment-variable values are redacted. The signed
-`/run` job envelope is shown in full so the signed model specification and
-signature can be inspected. It does not contain the HMAC key, but it may
-contain model-source URLs and should be treated as operationally sensitive.
-
-Every live invocation first submits the model specification with one signature
-nibble changed. This is a successful smoke-test outcome only when the CPU
-worker explicitly rejects it for a signature error; no model download should
-begin. Without recreating the endpoint or volume, the harness then submits the
-valid envelope and requires the download to complete successfully.
+redacted request/result summary. Authorization headers, tokens, and all endpoint
+environment-variable values are redacted. The `/run` request is shown in full;
+it may contain model-source URLs and should be treated as operationally sensitive.
 
 ## Cleanup and failure behavior
 

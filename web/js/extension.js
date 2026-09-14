@@ -314,7 +314,6 @@ function getSettings() {
         managedProfile: app.extensionManager.setting.get("Run on Runpod.Serverless.managedProfile") || "",
         managedRecipeId: app.extensionManager.setting.get("Run on Runpod.Serverless.managedRecipeId") || "default",
         managedStateRoot: app.extensionManager.setting.get("Run on Runpod.Serverless.managedStateRoot") || "",
-        managedSigningKey: app.extensionManager.setting.get("Run on Runpod.Keys.cpuStagingHmacKey") || "",
         civitaiApiKey: app.extensionManager.setting.get("Run on Runpod.Keys.civitaiApiKey") || "",
         hfToken: app.extensionManager.setting.get("Run on Runpod.Keys.hfToken") || "",
     };
@@ -542,7 +541,6 @@ function renderJobList() {
     if (!s.apiKey) missing.push("API Key");
     if (s.stagingMode === "cpu") {
         if (!s.managedProfile) missing.push("CPU Managed Profile JSON");
-        if (!s.managedSigningKey) missing.push("CPU Staging HMAC Key");
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
         if (!s.endpointId) missing.push("Endpoint ID");
@@ -576,7 +574,6 @@ async function submitJob() {
     if (!s.apiKey) missing.push("API Key");
     if (s.stagingMode === "cpu") {
         if (!s.managedProfile) missing.push("CPU Managed Profile JSON");
-        if (!s.managedSigningKey) missing.push("CPU Staging HMAC Key");
         if (!s.managedSessionId) missing.push("Active Managed Session");
     } else {
         if (!s.endpointId) missing.push("Endpoint ID");
@@ -761,8 +758,8 @@ async function startManagedSession(btn) {
         alert("A RunPod API Key is required to create managed resources.");
         return;
     }
-    if (!settings.managedProfile || !settings.managedSigningKey) {
-        alert("CPU managed staging requires the managed profile JSON and CPU staging HMAC key.");
+    if (!settings.managedProfile) {
+        alert("CPU managed staging requires the managed profile JSON.");
         return;
     }
 
@@ -1477,14 +1474,6 @@ app.registerExtension({
             tooltip: "What happens when you click the X on a finished job card. 'Delete' removes the local output files (and any folder that becomes empty). 'Keep' only removes the card. 'Ask' shows a confirmation every time, even for single-file jobs.",
         },
         {
-            id: "Run on Runpod.Keys.cpuStagingHmacKey",
-            name: "CPU staging HMAC key",
-            type: "text",
-            defaultValue: "",
-            attrs: { type: "password" },
-            tooltip: "The local copy of the CPU staging HMAC key. Create the same value as a RunPod stored secret mapped to STAGING_REQUEST_HMAC_KEY in the managed profile. See docs/cpu-staging-hmac-key.md.",
-        },
-        {
             id: "Run on Runpod.Keys.hfToken",
             name: "HuggingFace Token",
             type: "text",
@@ -1530,7 +1519,7 @@ app.registerExtension({
 			type: (name, setter, value, attrs) => {
                 const text = document.createElement("span");
                 text.textContent =
-                    "Credentials are sent to the ComfyUI server. Use HTTPS when it is remote. RunPod API keys, S3 credentials, provider credentials used by GPU-only mode, and the CPU staging HMAC key are sent from this browser to the ComfyUI server. A remote ComfyUI server without HTTPS can expose them in transit.";
+                    "Credentials are sent to the ComfyUI server. Use HTTPS when it is remote. RunPod API keys, S3 credentials, and provider credentials used by GPU-only mode are sent from this browser to the ComfyUI server. A remote ComfyUI server without HTTPS can expose them in transit.";
 
                 return text;
             },

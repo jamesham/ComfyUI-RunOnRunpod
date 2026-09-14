@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import output_transfer
-from cpu_staging_contract import sign_stage_request, stage_request_from_downloads
+from cpu_staging_contract import stage_request_from_downloads
 
 
 def load_routes():
@@ -124,7 +124,7 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             "auth": "hf",
         }])
 
-    async def test_cpu_stager_requires_a_signed_request_for_exact_plan(self):
+    async def test_cpu_stager_requires_a_request_for_exact_plan(self):
         expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
         metadata = {"base.safetensors": {
             "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
@@ -142,16 +142,16 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             self.settings, stagingMode="cpu", cpuStagerEndpointId="cpu-endpoint",
             cpuStagerVolumeBinding="volume-1",
         )
-        configured["cpuStagerSignedRequest"] = sign_stage_request(payload, "coordinator-key")
+        configured["cpuStagerRequest"] = payload
         operation = self.routes._cpu_stager_request(configured, preparation, "prep-1")
         self.assertEqual(operation.endpoint_id, "cpu-endpoint")
-        self.assertEqual(operation.signed_request, configured["cpuStagerSignedRequest"])
+        self.assertEqual(operation.stage_request, configured["cpuStagerRequest"])
         self.assertIsNone(operation.coordinator)
-        configured["cpuStagerSignedRequest"]["payload"]["models"][0]["expected_size"] = 13
+        configured["cpuStagerRequest"]["models"][0]["expected_size"] = 13
         with self.assertRaisesRegex(self.routes._SubmitError, "does not match"):
             self.routes._cpu_stager_request(configured, preparation, "prep-1")
 
-    async def test_managed_session_gets_endpoint_and_envelope_from_server_coordinator(self):
+    async def test_managed_session_gets_endpoint_and_request_from_server_coordinator(self):
         expected_sha256 = hashlib.sha256(b"remote bytes").hexdigest()
         metadata = {"base.safetensors": {
             "url": "https://huggingface.co/org/repo/resolve/commit/base.safetensors",
@@ -167,19 +167,19 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
             "profile_id": "profile-1", "recipe_id": "recipe-1",
             "bindings": {"cpu_endpoint_id": "managed-cpu", "volume_binding": "volume-1"},
         }
-        fake.authorize_stage.return_value = {"payload": "signed"}
+        fake.prepare_stage_request.return_value = {"operation_id": "prep-1"}
         with patch.object(
             self.routes, "managed_configuration_from_settings",
             return_value=(fake, Mock(profile_id="profile-1"), "recipe-1"),
-        ), patch.object(self.routes, "signing_key_from_settings", return_value="ui-supplied"):
+        ):
             operation = self.routes._cpu_stager_request(
                 dict(self.settings, stagingMode="cpu", managedSessionId="session-1"), preparation, "prep-1",
             )
         self.assertEqual(operation.endpoint_id, "managed-cpu")
         self.assertEqual(operation.session_id, "session-1")
         self.assertIs(operation.coordinator, fake)
-        fake.authorize_stage.assert_called_once_with(
-            "session-1", "prep-1", preparation.worker_downloads, "ui-supplied",
+        fake.prepare_stage_request.assert_called_once_with(
+            "session-1", "prep-1", preparation.worker_downloads,
         )
 
     async def test_gpu_mode_is_default_and_uses_legacy_worker_fetch(self):
@@ -227,12 +227,12 @@ class PreparationGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_cpu_submission_prepares_before_any_gpu_or_s3_call(self):
         settings = dict(
             self.settings, stagingMode="cpu", managedSessionId="session-1",
-            managedProfile="{\"profile_version\": 1}", managedSigningKey="hmac",
+            managedProfile="{\"profile_version\": 1}",
         )
         for key in ("endpointId", "bucketName", "s3AccessKey", "s3SecretKey", "endpointUrl"):
             settings.pop(key)
         operation = SimpleNamespace(
-            endpoint_id="cpu-endpoint", volume_binding="volume-1", signing_key="hmac",
+            endpoint_id="cpu-endpoint", volume_binding="volume-1",
         )
         order = []
 

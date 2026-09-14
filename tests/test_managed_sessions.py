@@ -9,7 +9,6 @@ from coordinator.managed_sessions import (
     default_state_root,
     lifecycle_from_settings,
     managed_configuration_from_settings,
-    signing_key_from_settings,
 )
 
 
@@ -23,7 +22,7 @@ class ManagedSessionTests(unittest.TestCase):
             "cpu": {
                 "image": "cpu@sha256:abc", "template_id": "cpu-template",
                 "flavor_ids": ["cpu3c"], "vcpu_count": 4,
-                "environment": {"STAGING_REQUEST_HMAC_KEY": "{{ RUNPOD_SECRET_cpu-hmac }}"},
+                "environment": {},
             },
             "gpu": {"image": "gpu@sha256:def", "pool_ids": ["ADA_24"], "disk_gb": 50},
         }
@@ -32,7 +31,6 @@ class ManagedSessionTests(unittest.TestCase):
             "managedProfile": json.dumps(self.profile),
             "managedRecipeId": "recipe-1",
             "managedStateRoot": self.directory.name,
-            "managedSigningKey": "local-hmac-value",
         }
 
     def test_lifecycle_uses_the_request_key_and_enables_mutations(self):
@@ -75,11 +73,6 @@ class ManagedSessionTests(unittest.TestCase):
         profile.pop("gpu")
         with self.assertRaisesRegex(ManagedSessionConfigError, "image and pool_ids"):
             managed_configuration_from_settings({**self.settings, "managedProfile": json.dumps(profile)})
-
-    def test_hmac_key_exists_only_in_current_settings(self):
-        self.assertEqual(signing_key_from_settings(self.settings), "local-hmac-value")
-        with self.assertRaisesRegex(ManagedSessionConfigError, "HMAC key"):
-            signing_key_from_settings({**self.settings, "managedSigningKey": ""})
 
     def test_default_state_root_is_plugin_local(self):
         self.assertEqual(default_state_root().name, ".runonrunpod")

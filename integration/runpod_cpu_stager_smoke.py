@@ -1,10 +1,9 @@
 """Opt-in live smoke test for a disposable RunPod CPU staging session.
 
 This script intentionally cannot run without ``--live``. It creates billable
-RunPod resources, verifies both refusal of an invalid signed request and
-successful processing of a valid request, and always attempts to delete only
+RunPod resources, stages one pinned download, and always attempts to delete only
 the exact resources recorded by the coordinator. It does not print API keys,
-HMAC values, or secret values.
+or secret values.
 """
 
 from __future__ import annotations
@@ -28,9 +27,8 @@ from resource_plan import ModelIdentity, compile_model_resource_plan
 
 _SECRET_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _SENSITIVE_DEBUG_FIELDS = frozenset({
-    "authorization", "apikey", "token", "secret", "password", "credential", "hmac",
+    "authorization", "apikey", "token", "secret", "password", "credential",
 })
-_REJECTION_PREPARATION_ID = "smoke-signature-rejection"
 _SUCCESS_PREPARATION_ID = "smoke-stage"
 
 
@@ -59,11 +57,6 @@ def _debug_value(value: object, field_name: str = "") -> object:
     normalized_name = re.sub(r"[^a-z0-9]", "", field_name.lower())
     if normalized_name in _SENSITIVE_DEBUG_FIELDS:
         return "<redacted>"
-    if normalized_name == "signedrequest":
-        # An HMAC envelope has no signing key. Its payload and signature are
-        # deliberately retained for --debug so the exact /run job body can be
-        # inspected; its model URLs may still be sensitive operational data.
-        return _debug_value(value) if isinstance(value, Mapping) else "<redacted>"
     if isinstance(value, Mapping):
         if normalized_name == "env":
             return {str(name): "<redacted>" for name in value}
@@ -82,17 +75,6 @@ def _debug_api_call(method: str, path: str, request: object, status: int | None,
     }, sort_keys=True), file=sys.stderr, flush=True)
 
 
-def _corrupt_signature(envelope: object) -> dict[str, object]:
-    """Return the same signed envelope with one signature nibble changed."""
-    if not isinstance(envelope, Mapping):
-        raise ValueError("coordinator did not return a signed staging envelope")
-    signature = envelope.get("signature")
-    if not isinstance(signature, str) or not signature:
-        raise ValueError("coordinator did not return a staging signature")
-    replacement = "0" if signature[0] != "0" else "1"
-    return {**dict(envelope), "signature": replacement + signature[1:]}
-
-
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create, exercise, inspect, and delete a temporary RunPod CPU stager session.",
@@ -101,11 +83,9 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--pause-after-create", action="store_true", help="wait for Enter after creation before staging and cleanup")
     parser.add_argument("--debug", action="store_true", help="log redacted RunPod API requests and results to stderr")
     parser.add_argument("--api-key-file", help="file containing the RunPod API key; otherwise prompt securely")
-    parser.add_argument("--signing-key-file", help="file containing the CPU HMAC key; otherwise prompt securely")
     parser.add_argument("--data-center", required=True, help="RunPod data-center ID for volume and CPU endpoint")
     parser.add_argument("--cpu-template-id", required=True, help="preconfigured worker-cpu Serverless template ID")
     parser.add_argument("--cpu-image", required=True, help="immutable worker-cpu image reference recorded in the profile")
-    parser.add_argument("--hmac-secret-name", required=True, help="RunPod stored-secret name mapped to STAGING_REQUEST_HMAC_KEY")
     parser.add_argument("--provider-secret-name", required=True, help="RunPod stored-secret name for the selected provider token")
     parser.add_argument("--provider", choices=("hf", "civitai"), default="hf", help="source provider auth type")
     parser.add_argument("--download-url", required=True, help="HTTPS model URL served by the selected provider")
@@ -148,7 +128,6 @@ def _profile(arguments: argparse.Namespace, session_id: str) -> ManagedProfile:
         idle_timeout_seconds=arguments.idle_timeout_seconds,
         execution_timeout_ms=arguments.execution_timeout_seconds * 1000,
         cpu_environment=(
-            ("STAGING_REQUEST_HMAC_KEY", _secret_reference(arguments.hmac_secret_name)),
             (provider_variable, _secret_reference(arguments.provider_secret_name)),
         ),
     )
@@ -185,7 +164,6 @@ def _safe_summary(session: dict[str, object]) -> dict[str, object]:
 def run(argv: Sequence[str] | None = None) -> int:
     arguments = _arguments(argv)
     api_key = _secret_from_file_or_prompt(arguments.api_key_file, "RunPod API key: ")
-    signing_key = _secret_from_file_or_prompt(arguments.signing_key_file, "CPU staging HMAC key: ")
     session_id = f"smoke-{uuid.uuid4().hex[:20]}"
     temporary_root: tempfile.TemporaryDirectory[str] | None = None
     if arguments.state_root:
@@ -208,33 +186,18 @@ def run(argv: Sequence[str] | None = None) -> int:
         session = service.start(recipe_id, profile, session_id=session_id)
         created = True
         print("CREATED", _safe_summary(session), flush=True)
-        print("Secret mappings requested: STAGING_REQUEST_HMAC_KEY and "
+        print("Secret mapping requested: "
               f"{'HF_TOKEN' if arguments.provider == 'hf' else 'CIVITAI_API_KEY'}", flush=True)
         if arguments.pause_after_create:
-            input("Inspect RunPod now. Press Enter to validate refusal, stage one download, and clean up these resources. ")
+            input("Inspect RunPod now. Press Enter to stage one download and clean up these resources. ")
 
         endpoint_id = session["bindings"]["cpu_endpoint_id"]
 
-        rejection_envelope = _corrupt_signature(coordinator.authorize_stage(
-            session_id, _REJECTION_PREPARATION_ID, [download], signing_key,
-        ))
-        try:
-            asyncio.run(stage_models(
-                endpoint_id, api_key, rejection_envelope, timeout_seconds=arguments.stage_timeout_seconds,
-                on_api_call=debug_call,
-            ))
-        except CpuStagerError as error:
-            if "signature" not in str(error).casefold():
-                raise
-            print("SIGNATURE REJECTED", {"reason": str(error)}, flush=True)
-        else:
-            raise RuntimeError("CPU stager accepted a deliberately corrupted signature")
-
-        success_envelope = coordinator.authorize_stage(
-            session_id, _SUCCESS_PREPARATION_ID, [download], signing_key,
+        stage_request = coordinator.prepare_stage_request(
+            session_id, _SUCCESS_PREPARATION_ID, [download],
         )
         result = asyncio.run(stage_models(
-            endpoint_id, api_key, success_envelope, timeout_seconds=arguments.stage_timeout_seconds,
+            endpoint_id, api_key, stage_request, timeout_seconds=arguments.stage_timeout_seconds,
             on_api_call=debug_call,
         ))
         coordinator.record_stage_result(session_id, _SUCCESS_PREPARATION_ID, result)

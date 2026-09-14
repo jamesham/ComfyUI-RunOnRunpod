@@ -45,7 +45,7 @@ class FakeSession:
 
     def get(self, _url, **_kwargs):
         output = dict(self.output)
-        payload = self.posts[-1][1]["json"]["input"]["signed_artifact_request"]["payload"]
+        payload = self.posts[-1][1]["json"]["input"]["artifact_request"]
         output["operation_id"] = payload["operation_id"]
         output["target_path"] = payload["target_path"]
         output["action"] = payload["action"]
@@ -53,7 +53,7 @@ class FakeSession:
 
 
 class CpuArtifactClientTests(unittest.IsolatedAsyncioTestCase):
-    async def test_upload_posts_signed_chunks_without_s3(self):
+    async def test_upload_posts_authenticated_chunks_without_s3(self):
         content = b"small local asset"
         digest = hashlib.sha256(content).hexdigest()
         result = {
@@ -69,16 +69,16 @@ class CpuArtifactClientTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules, {"aiohttp": aiohttp}), \
                  patch("cpu_artifact_client.asyncio.sleep", new=AsyncMock()):
                 returned = await upload_file(
-                    "cpu-endpoint", "api-key", "hmac", "volume-1", "prep-1",
+                    "cpu-endpoint", "api-key", "volume-1", "prep-1",
                     "models/checkpoints/model.bin", str(source),
                 )
         self.assertEqual(returned, result)
         self.assertEqual(session.posts[0][0], "https://api.runpod.ai/v2/cpu-endpoint/run")
-        request = session.posts[0][1]["json"]["input"]["signed_artifact_request"]
-        self.assertEqual(request["payload"]["action"], "write")
-        self.assertEqual(request["payload"]["target_path"], "models/checkpoints/model.bin")
-        self.assertEqual(request["payload"]["expected_sha256"], digest)
+        request = session.posts[0][1]["json"]["input"]["artifact_request"]
+        self.assertEqual(request["action"], "write")
+        self.assertEqual(request["target_path"], "models/checkpoints/model.bin")
+        self.assertEqual(request["expected_sha256"], digest)
         self.assertEqual(session.posts[0][1]["headers"]["User-Agent"], "ComfyUI-RunOnRunpod")
-        # The client signs the payload locally and never sends a provider token
-        # or an S3 bucket/credential field.
+        # The RunPod API key authenticates the request; the payload never sends
+        # a provider token or an S3 bucket/credential field.
         self.assertNotIn("s3", repr(session.posts[0][1]["json"]).lower())
