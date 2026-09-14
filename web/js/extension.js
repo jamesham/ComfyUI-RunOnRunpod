@@ -1520,7 +1520,11 @@ app.registerExtension({
             defaultValue: "",
             attrs: { type: "password" },
         },
-		{
+        // ComfyUI renders this category in reverse registration order, so keep
+        // this notice after the credential fields to display it first. The
+        // custom-renderer signature is defined in ComfyUI_frontend's settings
+        // types: https://github.com/Comfy-Org/ComfyUI_frontend/blob/main/src/platform/settings/types.ts
+        {
             id: "Run on Runpod.Keys.transportWarning",
             name: "Credential transport warning",
 			type: (name, setter, value, attrs) => {
@@ -1549,7 +1553,9 @@ app.registerExtension({
             type: "text",
             defaultValue: "",
         },
-		{
+        // Keep this notice after the S3 fields for the same reverse-order
+        // behavior described above, so users see the CPU-mode exception first.
+        {
             id: "Run on Runpod.Storage.cpuManagedStagingNotice",
             name: "CPU managed staging",
             type: (name, setter, value, attrs) => {
