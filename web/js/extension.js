@@ -1445,14 +1445,6 @@ app.registerExtension({
             defaultValue: true,
         },
         {
-            id: "Run on Runpod.Storage.cpuManagedStagingNotice",
-            name: "CPU managed staging",
-            type: "text",
-            defaultValue: "S3 connection settings are not used in CPU managed staging mode.",
-            attrs: { readonly: true },
-            tooltip: "CPU managed staging transfers models, workflow inputs, and outputs through the managed CPU endpoint and temporary network volume. Endpoint URL, Region, Bucket Name, S3 Access Key, and S3 Secret Key are ignored. The cleanup options below still apply.",
-        },
-        {
             id: "Run on Runpod.Storage.deleteOutputsAfterJob",
             name: "Delete output files from network volume after job finishes",
             type: "boolean",
@@ -1483,14 +1475,6 @@ app.registerExtension({
                 { text: "Ask each time", value: "ask" },
             ],
             tooltip: "What happens when you click the X on a finished job card. 'Delete' removes the local output files (and any folder that becomes empty). 'Keep' only removes the card. 'Ask' shows a confirmation every time, even for single-file jobs.",
-        },
-        {
-            id: "Run on Runpod.Keys.transportWarning",
-            name: "Credential transport warning",
-            type: "text",
-            defaultValue: "Credentials are sent to the ComfyUI server. Use HTTPS when it is remote.",
-            attrs: { readonly: true },
-            tooltip: "RunPod API keys, S3 credentials, provider credentials used by GPU-only mode, and the CPU staging HMAC key are sent from this browser to the ComfyUI server. A remote ComfyUI server without HTTPS can expose them in transit.",
         },
         {
             id: "Run on Runpod.Keys.cpuStagingHmacKey",
@@ -1536,6 +1520,17 @@ app.registerExtension({
             defaultValue: "",
             attrs: { type: "password" },
         },
+		{
+            id: "Run on Runpod.Keys.transportWarning",
+            name: "Credential transport warning",
+			type: (name, setter, value, attrs) => {
+                const text = document.createElement("span");
+                text.textContent =
+                    "Credentials are sent to the ComfyUI server. Use HTTPS when it is remote. RunPod API keys, S3 credentials, provider credentials used by GPU-only mode, and the CPU staging HMAC key are sent from this browser to the ComfyUI server. A remote ComfyUI server without HTTPS can expose them in transit.";
+
+                return text;
+            },
+        },
         {
             id: "Run on Runpod.Storage.endpointUrl",
             name: "Endpoint URL",
@@ -1553,6 +1548,17 @@ app.registerExtension({
             name: "Bucket Name",
             type: "text",
             defaultValue: "",
+        },
+		{
+            id: "Run on Runpod.Storage.cpuManagedStagingNotice",
+            name: "CPU managed staging",
+            type: (name, setter, value, attrs) => {
+                const text = document.createElement("span");
+                text.textContent =
+                    "S3 connection settings are not used in CPU managed staging mode. CPU managed staging transfers models, workflow inputs, and outputs through the managed CPU endpoint and temporary network volume. Endpoint URL, Region, Bucket Name, S3 Access Key, and S3 Secret Key are ignored. The cleanup options below still apply.";
+
+                return text;
+            },
         },
         {
             id: "Run on Runpod.Serverless.managedProfile",
